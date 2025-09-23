@@ -1,7 +1,0 @@
-r2x>=1.1.0
-pypsa
-pandas
-loguru
-
-[dev]
-pytest
