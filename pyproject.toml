@@ -1,9 +1,25 @@
 [project]
-name = "r2x_r2x_pypsa"
+name = "r2x-pypsa"
 version = "0.1.0"
-description = "R2X external plugin for r2x_pypsa"
-dependencies = ["r2x"]
-requires-python = ">=3.10"
+description = "PyPSA to R2X parser and converter"
+readme = "README.md"
+dependencies = [
+    "r2x>=1.1.0",
+    "pypsa",
+    "pandas",
+    "loguru"
+]
+requires-python = ">=3.11"
 
-[project.entry-points."r2x_plugin"]
-r2x_pypsa = "r2x_pypsa.plugin:create_plugin_components"
+[project.optional-dependencies]
+dev = [
+    "pytest"
+]
+
+[tool.uv.sources]
+r2x = { git = "https://github.com/NREL/r2x", branch = "v2.0.0" }
+
+[tool.pytest.ini_options]
+pythonpath = [
+  "src"
+]

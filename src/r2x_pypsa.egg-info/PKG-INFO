@@ -1,0 +1,14 @@
+Metadata-Version: 2.4
+Name: r2x-pypsa
+Version: 0.1.0
+Summary: PyPSA to R2X parser and converter
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: r2x>=1.1.0
+Requires-Dist: pypsa
+Requires-Dist: pandas
+Requires-Dist: loguru
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+
+# r2x-pypsa
