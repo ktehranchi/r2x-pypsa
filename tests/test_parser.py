@@ -5,7 +5,8 @@ import logging
 from pathlib import Path
 from r2x.api import System
 
-from r2x_pypsa.parser import PypsaParser, PypsaGenerator
+from r2x_pypsa.parser import PypsaParser
+from r2x_pypsa.models import PypsaGenerator
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -73,7 +74,11 @@ def test_build_system(simple_parser: PypsaParser) -> None:
     assert gen1.bus == "bus1"
     assert gen1.carrier == "solar"
     assert gen1.p_nom == 100.0
-    assert gen1.marginal_cost == 0.0
+    # marginal_cost may be static (float) or a Series; both acceptable
+    if isinstance(gen1.marginal_cost, pd.Series):
+        assert all(gen1.marginal_cost == 0.0)
+    else:
+        assert gen1.marginal_cost == 0.0
 
 
 def test_generator_attributes(simple_parser: PypsaParser) -> None:
@@ -92,6 +97,11 @@ def test_generator_attributes(simple_parser: PypsaParser) -> None:
         assert hasattr(gen, 'marginal_cost')
         assert hasattr(gen, 'uuid')
         assert gen.uuid is not None  # UUID should be auto-generated
+        # Time-varying attributes may be float (static) or Series (TS)
+        assert isinstance(gen.marginal_cost, (float, pd.Series))
+        assert isinstance(gen.efficiency, (float, pd.Series))
+        assert isinstance(gen.p_max_pu, (float, pd.Series))
+        assert isinstance(gen.p_min_pu, (float, pd.Series))
 
 
 def test_real_pypsa_file():
@@ -149,6 +159,54 @@ def test_empty_network(tmp_path):
     # Should have no generators
     generators = list(system.get_components(PypsaGenerator))
     assert len(generators) == 0
+
+
+def test_time_varying_data(tmp_path):
+    """Test parser with time-varying generator data."""
+    # Create network with time-varying data
+    n = pypsa.Network()
+    n.snapshots = pd.date_range("2023-01-01", periods=4, freq="h")
+    
+    # Add buses
+    n.add("Bus", "bus1", carrier="AC", v_nom=138)
+    
+    # Add generator with static values
+    n.add("Generator", "gen_static", bus="bus1", carrier="gas", p_nom=100, marginal_cost=50)
+    
+    # Add generator with time-varying marginal cost
+    n.add("Generator", "gen_timevar", bus="bus1", carrier="solar", p_nom=50, marginal_cost=0)
+    
+    # Add time-varying marginal cost data
+    n.generators_t.marginal_cost = pd.DataFrame({
+        'gen_timevar': [0, 5, 10, 0]  # Varies by hour
+    }, index=n.snapshots)
+    
+    # Save to temporary NetCDF file
+    netcdf_path = tmp_path / "timevar_network.nc"
+    n.export_to_netcdf(netcdf_path)
+    
+    # Test parser
+    parser = PypsaParser(netcdf_file=str(netcdf_path))
+    system = parser.build_system()
+    
+    generators = list(system.get_components(PypsaGenerator))
+    assert len(generators) == 2
+    
+    # Find generators by name
+    gen_static = next(gen for gen in generators if gen.name == "gen_static")
+    gen_timevar = next(gen for gen in generators if gen.name == "gen_timevar")
+    
+    # Check static generator (should be a scalar value under memory-efficient mode)
+    assert isinstance(gen_static.marginal_cost, (float, int))
+    assert float(gen_static.marginal_cost) == 50.0
+    
+    # Check time-varying generator
+    assert isinstance(gen_timevar.marginal_cost, pd.Series)
+    assert len(gen_timevar.marginal_cost) == 4  # 4 time periods
+    assert gen_timevar.marginal_cost.iloc[0] == 0  # First hour
+    assert gen_timevar.marginal_cost.iloc[1] == 5  # Second hour
+    assert gen_timevar.marginal_cost.iloc[2] == 10  # Third hour
+    assert gen_timevar.marginal_cost.iloc[3] == 0  # Fourth hour
 
 
 

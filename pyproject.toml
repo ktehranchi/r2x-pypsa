@@ -5,7 +5,7 @@ description = "PyPSA to R2X parser and converter"
 readme = "README.md"
 dependencies = [
     "r2x>=1.1.0",
-    "pypsa",
+    "pypsa==0.35.2",
     "pandas",
     "loguru"
 ]

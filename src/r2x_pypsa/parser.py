@@ -10,20 +10,7 @@ from loguru import logger
 from uuid import uuid4
 from infrasys.component import Component
 
-
-class PypsaGenerator(Component):
-    """PyPSA Generator component."""
-
-    name: str
-    bus: str
-    carrier: str
-    p_nom: float = 0.0
-    p_nom_extendable: bool = False
-    marginal_cost: float = 0.0
-    capital_cost: float = 0.0
-    efficiency: float = 1.0
-    p_max_pu: float = 1.0
-    p_min_pu: float = 0.0
+from r2x_pypsa.models import PypsaGenerator, get_ts_or_static
 
 
 @PluginManager.register_cli("parser", "r2x_pypsaParser")
@@ -78,6 +65,12 @@ class PypsaParser(BaseParser):
             
         logger.info(f"Processing {len(self.network.generators)} generators")
         
+        # Get all time-varying data using get_switchable_as_dense (handles static vs time-varying automatically)
+        marginal_cost_t = self.network.get_switchable_as_dense('Generator', 'marginal_cost')
+        efficiency_t = self.network.get_switchable_as_dense('Generator', 'efficiency')
+        p_max_pu_t = self.network.get_switchable_as_dense('Generator', 'p_max_pu')
+        p_min_pu_t = self.network.get_switchable_as_dense('Generator', 'p_min_pu')
+        
         for gen_name, gen_data in self.network.generators.iterrows():
             try:
                 # Create PyPSA generator component
@@ -87,11 +80,12 @@ class PypsaParser(BaseParser):
                     carrier=gen_data.get("carrier", "unknown"),
                     p_nom=float(gen_data.get("p_nom", 0.0)) if not pd.isna(gen_data.get("p_nom", 0.0)) else 0.0,
                     p_nom_extendable=bool(gen_data.get("p_nom_extendable", False)),
-                    marginal_cost=float(gen_data.get("marginal_cost", 0.0)) if not pd.isna(gen_data.get("marginal_cost", 0.0)) else 0.0,
                     capital_cost=float(gen_data.get("capital_cost", 0.0)) if not pd.isna(gen_data.get("capital_cost", 0.0)) else 0.0,
-                    efficiency=float(gen_data.get("efficiency", 1.0)) if not pd.isna(gen_data.get("efficiency", 1.0)) else 1.0,
-                    p_max_pu=float(gen_data.get("p_max_pu", 1.0)) if not pd.isna(gen_data.get("p_max_pu", 1.0)) else 1.0,
-                    p_min_pu=float(gen_data.get("p_min_pu", 0.0)) if not pd.isna(gen_data.get("p_min_pu", 0.0)) else 0.0,
+                    # Prefer time series if populated; else static scalar
+                    marginal_cost=get_ts_or_static(self.network, 'generators_t', 'marginal_cost', gen_name, marginal_cost_t, gen_data, 0.0),
+                    efficiency=get_ts_or_static(self.network, 'generators_t', 'efficiency', gen_name, efficiency_t, gen_data, 1.0),
+                    p_max_pu=get_ts_or_static(self.network, 'generators_t', 'p_max_pu', gen_name, p_max_pu_t, gen_data, 1.0),
+                    p_min_pu=get_ts_or_static(self.network, 'generators_t', 'p_min_pu', gen_name, p_min_pu_t, gen_data, 0.0),
                 )
                 
                 # Add generator to system

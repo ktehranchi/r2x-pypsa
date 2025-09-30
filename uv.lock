@@ -2149,7 +2149,7 @@ dev = [
 requires-dist = [
     { name = "loguru" },
     { name = "pandas" },
-    { name = "pypsa" },
+    { name = "pypsa", specifier = "==0.35.2" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "r2x", git = "https://github.com/NREL/r2x?branch=v2.0.0" },
 ]

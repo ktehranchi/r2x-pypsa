@@ -1,5 +1,5 @@
 import pytest
-from r2x_pypsa.parser import PypsaGenerator
+from r2x_pypsa.models import PypsaGenerator
 
 
 def test_pypsa_generator():
@@ -45,5 +45,5 @@ def test_pypsa_generator_uuid_generation():
     gen2 = PypsaGenerator(name="gen2", bus="bus1", carrier="wind")
     
     assert gen1.uuid != gen2.uuid
-    assert len(gen1.uuid) > 0
-    assert len(gen2.uuid) > 0
+    assert str(gen1.uuid) != ""
+    assert str(gen2.uuid) != ""
