@@ -6,7 +6,7 @@ from pathlib import Path
 from r2x.api import System
 
 from r2x_pypsa.parser import PypsaParser
-from r2x_pypsa.models import PypsaGenerator, PypsaBus, PypsaStorageUnit, get_series_only
+from r2x_pypsa.models import PypsaGenerator, PypsaBus, PypsaStorageUnit, PypsaLink, PypsaLine, PypsaLoad, PypsaStore, get_series_only
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -35,6 +35,22 @@ def simple_netcdf_file(tmp_path):
           efficiency_store=0.9, efficiency_dispatch=0.9, marginal_cost=5)
     n.add("StorageUnit", "storage2", bus="bus2", carrier="pumped_hydro", p_nom=100, max_hours=8,
           efficiency_store=0.8, efficiency_dispatch=0.8, marginal_cost=2)
+    
+    # Add links
+    n.add("Link", "link1", bus0="bus1", bus1="bus2", carrier="HVDC", p_nom=50, efficiency=0.95, marginal_cost=1)
+    n.add("Link", "link2", bus0="bus2", bus1="bus1", carrier="converter", p_nom=30, efficiency=0.98, marginal_cost=0.5)
+    
+    # Add lines
+    n.add("Line", "line1", bus0="bus1", bus1="bus2", x=0.1, r=0.01, s_nom=100, carrier="AC")
+    n.add("Line", "line2", bus0="bus2", bus1="bus1", x=0.15, r=0.02, s_nom=80, carrier="AC")
+    
+    # Add loads
+    n.add("Load", "load1", bus="bus1", carrier="electricity", p_set=20, q_set=5)
+    n.add("Load", "load2", bus="bus2", carrier="electricity", p_set=15, q_set=3)
+    
+    # Add stores
+    n.add("Store", "store1", bus="bus1", carrier="hydrogen", e_nom=100, marginal_cost=2, standing_loss=0.01)
+    n.add("Store", "store2", bus="bus2", carrier="heat", e_nom=50, marginal_cost=1, standing_loss=0.02)
     
     # Save to temporary NetCDF file
     netcdf_path = tmp_path / "test_network.nc"
@@ -479,5 +495,186 @@ def test_storage_unit_model_creation():
     assert storage.max_hours == 4.0
     assert storage.p_nom_extendable is False  # default
     assert storage.cyclic_state_of_charge is False  # default
+
+
+def test_link_parsing(simple_netcdf_file):
+    """Test that links are parsed correctly."""
+    parser = PypsaParser(netcdf_file=str(simple_netcdf_file))
+    system = parser.build_system()
+    
+    # Check that links were created
+    links = list(system.get_components(PypsaLink))
+    assert len(links) == 2  # link1 and link2 from fixture
+    
+    # Check first link attributes
+    link1 = next(link for link in links if link.name == "link1")
+    assert link1.bus0 == "bus1"
+    assert link1.bus1 == "bus2"
+    assert link1.carrier == "HVDC"
+    assert link1.p_nom == 50.0
+    assert link1.efficiency == 0.95
+    assert link1.marginal_cost == 1.0
+    
+    # Check second link attributes
+    link2 = next(link for link in links if link.name == "link2")
+    assert link2.bus0 == "bus2"
+    assert link2.bus1 == "bus1"
+    assert link2.carrier == "converter"
+    assert link2.p_nom == 30.0
+    assert link2.efficiency == 0.98
+    assert link2.marginal_cost == 0.5
+
+
+def test_link_model_creation():
+    """Test PypsaLink model creation with minimal attributes."""
+    link = PypsaLink(
+        name="test_link",
+        bus0="bus1",
+        bus1="bus2",
+        p_nom=100.0,
+        efficiency=0.9
+    )
+    
+    assert link.name == "test_link"
+    assert link.bus0 == "bus1"
+    assert link.bus1 == "bus2"
+    assert link.p_nom == 100.0
+    assert link.efficiency == 0.9
+    assert link.active is True  # default
+    assert link.committable is False  # default
+
+
+def test_line_parsing(simple_netcdf_file):
+    """Test that lines are parsed correctly."""
+    parser = PypsaParser(netcdf_file=str(simple_netcdf_file))
+    system = parser.build_system()
+    
+    # Check that lines were created
+    lines = list(system.get_components(PypsaLine))
+    assert len(lines) == 2  # line1 and line2 from fixture
+    
+    # Check first line attributes
+    line1 = next(line for line in lines if line.name == "line1")
+    assert line1.bus0 == "bus1"
+    assert line1.bus1 == "bus2"
+    assert line1.x == 0.1
+    assert line1.r == 0.01
+    assert line1.s_nom == 100.0
+    assert line1.carrier == "AC"
+    
+    # Check second line attributes
+    line2 = next(line for line in lines if line.name == "line2")
+    assert line2.bus0 == "bus2"
+    assert line2.bus1 == "bus1"
+    assert line2.x == 0.15
+    assert line2.r == 0.02
+    assert line2.s_nom == 80.0
+    assert line2.carrier == "AC"
+
+
+def test_line_model_creation():
+    """Test PypsaLine model creation with minimal attributes."""
+    line = PypsaLine(
+        name="test_line",
+        bus0="bus1",
+        bus1="bus2",
+        x=0.2,
+        r=0.05,
+        s_nom=150.0
+    )
+    
+    assert line.name == "test_line"
+    assert line.bus0 == "bus1"
+    assert line.bus1 == "bus2"
+    assert line.x == 0.2
+    assert line.r == 0.05
+    assert line.s_nom == 150.0
+    assert line.carrier == "AC"  # default
+    assert line.active is True  # default
+
+
+def test_load_parsing(simple_netcdf_file):
+    """Test that loads are parsed correctly."""
+    parser = PypsaParser(netcdf_file=str(simple_netcdf_file))
+    system = parser.build_system()
+    
+    # Check that loads were created
+    loads = list(system.get_components(PypsaLoad))
+    assert len(loads) == 2  # load1 and load2 from fixture
+    
+    # Check first load attributes
+    load1 = next(load for load in loads if load.name == "load1")
+    assert load1.bus == "bus1"
+    assert load1.carrier == "electricity"
+    assert load1.p_set == 20.0
+    assert load1.q_set == 5.0
+    
+    # Check second load attributes
+    load2 = next(load for load in loads if load.name == "load2")
+    assert load2.bus == "bus2"
+    assert load2.carrier == "electricity"
+    assert load2.p_set == 15.0
+    assert load2.q_set == 3.0
+
+
+def test_load_model_creation():
+    """Test PypsaLoad model creation with minimal attributes."""
+    load = PypsaLoad(
+        name="test_load",
+        bus="bus1",
+        p_set=25.0,
+        q_set=6.0
+    )
+    
+    assert load.name == "test_load"
+    assert load.bus == "bus1"
+    assert load.p_set == 25.0
+    assert load.q_set == 6.0
+    assert load.sign == -1.0  # default
+    assert load.active is True  # default
+
+
+def test_store_parsing(simple_netcdf_file):
+    """Test that stores are parsed correctly."""
+    parser = PypsaParser(netcdf_file=str(simple_netcdf_file))
+    system = parser.build_system()
+    
+    # Check that stores were created
+    stores = list(system.get_components(PypsaStore))
+    assert len(stores) == 2  # store1 and store2 from fixture
+    
+    # Check first store attributes
+    store1 = next(store for store in stores if store.name == "store1")
+    assert store1.bus == "bus1"
+    assert store1.carrier == "hydrogen"
+    assert store1.e_nom == 100.0
+    assert store1.marginal_cost == 2.0
+    assert store1.standing_loss == 0.01
+    
+    # Check second store attributes
+    store2 = next(store for store in stores if store.name == "store2")
+    assert store2.bus == "bus2"
+    assert store2.carrier == "heat"
+    assert store2.e_nom == 50.0
+    assert store2.marginal_cost == 1.0
+    assert store2.standing_loss == 0.02
+
+
+def test_store_model_creation():
+    """Test PypsaStore model creation with minimal attributes."""
+    store = PypsaStore(
+        name="test_store",
+        bus="bus1",
+        e_nom=75.0,
+        marginal_cost=1.5
+    )
+    
+    assert store.name == "test_store"
+    assert store.bus == "bus1"
+    assert store.e_nom == 75.0
+    assert store.marginal_cost == 1.5
+    assert store.e_nom_extendable is False  # default
+    assert store.e_cyclic is False  # default
+    assert store.active is True  # default
 
 

@@ -10,7 +10,7 @@ from loguru import logger
 from uuid import uuid4
 from infrasys.component import Component
 
-from r2x_pypsa.models import PypsaGenerator, PypsaBus, PypsaStorageUnit, get_ts_or_static, get_series_only, safe_float, safe_str
+from r2x_pypsa.models import PypsaGenerator, PypsaBus, PypsaStorageUnit, PypsaLink, PypsaLine, PypsaLoad, PypsaStore, get_ts_or_static, get_series_only, safe_float, safe_str
 
 
 @PluginManager.register_cli("parser", "r2x_pypsaParser")
@@ -56,6 +56,11 @@ class PypsaParser(BaseParser):
         self._process_buses(system)
         self._process_generators(system)
         self._process_storage_units(system)
+        self._process_stores(system)
+        self._process_links(system)
+        self._process_lines(system)
+        self._process_loads(system)
+        
         
         logger.info(f"Successfully created R2X system with {len(list(system.get_components(Component)))} components")
         return system
@@ -108,7 +113,11 @@ class PypsaParser(BaseParser):
             
         logger.info(f"Processing {len(self.network.generators)} generators")
         
-        # Get all time-varying data using get_switchable_as_dense (handles static vs time-varying automatically)
+        # Get time-varying data using get_switchable_as_dense
+        available_attrs = set(self.network.generators.columns)
+        nan_default_attrs = {'ramp_limit_up', 'ramp_limit_down'}
+        
+        # Normal attributes (always exist)
         p_min_pu_t = self.network.get_switchable_as_dense('Generator', 'p_min_pu')
         p_max_pu_t = self.network.get_switchable_as_dense('Generator', 'p_max_pu')
         p_set_t = self.network.get_switchable_as_dense('Generator', 'p_set')
@@ -117,8 +126,10 @@ class PypsaParser(BaseParser):
         marginal_cost_quadratic_t = self.network.get_switchable_as_dense('Generator', 'marginal_cost_quadratic')
         efficiency_t = self.network.get_switchable_as_dense('Generator', 'efficiency')
         stand_by_cost_t = self.network.get_switchable_as_dense('Generator', 'stand_by_cost')
-        ramp_limit_up_t = self.network.get_switchable_as_dense('Generator', 'ramp_limit_up')
-        ramp_limit_down_t = self.network.get_switchable_as_dense('Generator', 'ramp_limit_down')
+        
+        # NaN default attributes (may not exist)
+        ramp_limit_up_t = self.network.get_switchable_as_dense('Generator', 'ramp_limit_up') if 'ramp_limit_up' in available_attrs else None
+        ramp_limit_down_t = self.network.get_switchable_as_dense('Generator', 'ramp_limit_down') if 'ramp_limit_down' in available_attrs else None
         
         # Series-only data will be accessed directly from network.generators.{attr}
         
@@ -172,8 +183,6 @@ class PypsaParser(BaseParser):
                     ramp_limit_down=get_ts_or_static(self.network, 'generators_t', 'ramp_limit_down', gen_name, ramp_limit_down_t, gen_data, float('nan')),
                     
                     
-                    # Output attributes (from optimization)
-                    p_nom_opt=safe_float(gen_data.get("p_nom_opt", 0.0)),
                 )
                 
                 # Add generator to system
@@ -261,8 +270,6 @@ class PypsaParser(BaseParser):
                     inflow=get_ts_or_static(self.network, 'storage_units_t', 'inflow', storage_name, inflow_t, storage_data, 0.0),
                     
                     
-                    # Output attributes (from optimization)
-                    p_nom_opt=safe_float(storage_data.get("p_nom_opt", 0.0)),
                 )
                 
                 # Add storage unit to system
@@ -271,6 +278,246 @@ class PypsaParser(BaseParser):
                 
             except Exception as e:
                 logger.warning(f"Failed to process storage unit {storage_name}: {e}")
+                continue
+
+    def _process_links(self, system: System) -> None:
+        """Process PyPSA links and convert to R2X format."""
+        if self.network is None:
+            return
+            
+        logger.info(f"Processing {len(self.network.links)} links")
+        
+        # Get time-varying data using get_switchable_as_dense
+        available_attrs = set(self.network.links.columns)
+        nan_default_attrs = {'ramp_limit_up', 'ramp_limit_down'}
+        
+        # Normal attributes (always exist)
+        efficiency_t = self.network.get_switchable_as_dense('Link', 'efficiency')
+        p_min_pu_t = self.network.get_switchable_as_dense('Link', 'p_min_pu')
+        p_max_pu_t = self.network.get_switchable_as_dense('Link', 'p_max_pu')
+        marginal_cost_t = self.network.get_switchable_as_dense('Link', 'marginal_cost')
+        marginal_cost_quadratic_t = self.network.get_switchable_as_dense('Link', 'marginal_cost_quadratic')
+        stand_by_cost_t = self.network.get_switchable_as_dense('Link', 'stand_by_cost')
+        p_set_t = self.network.get_switchable_as_dense('Link', 'p_set')
+        
+        # NaN default attributes (may not exist)
+        ramp_limit_up_t = self.network.get_switchable_as_dense('Link', 'ramp_limit_up') if 'ramp_limit_up' in available_attrs else None
+        ramp_limit_down_t = self.network.get_switchable_as_dense('Link', 'ramp_limit_down') if 'ramp_limit_down' in available_attrs else None
+        
+        for link_name, link_data in self.network.links.iterrows():
+            try:
+                # Create PyPSA link component with all attributes
+                link = PypsaLink(
+                    # Required attributes
+                    name=link_name,
+                    bus0=link_data.get("bus0", "unknown"),
+                    bus1=link_data.get("bus1", "unknown"),
+                    
+                    # Static attributes
+                    type=safe_str(link_data.get("type")),
+                    carrier=safe_str(link_data.get("carrier")),
+                    active=bool(link_data.get("active", True)),
+                    build_year=int(link_data.get("build_year", 0)),
+                    lifetime=safe_float(link_data.get("lifetime", float('inf'))),
+                    p_nom=safe_float(link_data.get("p_nom", 0.0)),
+                    p_nom_mod=safe_float(link_data.get("p_nom_mod", 0.0)),
+                    p_nom_extendable=bool(link_data.get("p_nom_extendable", False)),
+                    p_nom_min=safe_float(link_data.get("p_nom_min", 0.0)),
+                    p_nom_max=safe_float(link_data.get("p_nom_max", float('inf'))),
+                    capital_cost=safe_float(link_data.get("capital_cost", 0.0)),
+                    length=safe_float(link_data.get("length", 0.0)),
+                    terrain_factor=safe_float(link_data.get("terrain_factor", 1.0)),
+                    committable=bool(link_data.get("committable", False)),
+                    start_up_cost=safe_float(link_data.get("start_up_cost", 0.0)),
+                    shut_down_cost=safe_float(link_data.get("shut_down_cost", 0.0)),
+                    min_up_time=int(link_data.get("min_up_time", 0)),
+                    min_down_time=int(link_data.get("min_down_time", 0)),
+                    up_time_before=int(link_data.get("up_time_before", 1)),
+                    down_time_before=int(link_data.get("down_time_before", 0)),
+                    ramp_limit_start_up=safe_float(link_data.get("ramp_limit_start_up", 1.0)),
+                    ramp_limit_shut_down=safe_float(link_data.get("ramp_limit_shut_down", 1.0)),
+                    
+                    # Time-varying attributes
+                    efficiency=get_ts_or_static(self.network, 'links_t', 'efficiency', link_name, efficiency_t, link_data, 1.0),
+                    p_set=get_ts_or_static(self.network, 'links_t', 'p_set', link_name, p_set_t, link_data, float('nan')),
+                    p_min_pu=get_ts_or_static(self.network, 'links_t', 'p_min_pu', link_name, p_min_pu_t, link_data, 0.0),
+                    p_max_pu=get_ts_or_static(self.network, 'links_t', 'p_max_pu', link_name, p_max_pu_t, link_data, 1.0),
+                    marginal_cost=get_ts_or_static(self.network, 'links_t', 'marginal_cost', link_name, marginal_cost_t, link_data, 0.0),
+                    marginal_cost_quadratic=get_ts_or_static(self.network, 'links_t', 'marginal_cost_quadratic', link_name, marginal_cost_quadratic_t, link_data, 0.0),
+                    stand_by_cost=get_ts_or_static(self.network, 'links_t', 'stand_by_cost', link_name, stand_by_cost_t, link_data, 0.0),
+                    ramp_limit_up=get_ts_or_static(self.network, 'links_t', 'ramp_limit_up', link_name, ramp_limit_up_t, link_data, float('nan')),
+                    ramp_limit_down=get_ts_or_static(self.network, 'links_t', 'ramp_limit_down', link_name, ramp_limit_down_t, link_data, float('nan')),
+                    
+                )
+                
+                # Add link to system
+                system.add_component(link)
+                logger.debug(f"Added link {link_name} from {link_data.get('bus0', 'unknown')} to {link_data.get('bus1', 'unknown')}")
+                
+            except Exception as e:
+                logger.warning(f"Failed to process link {link_name}: {e}")
+                continue
+
+    def _process_lines(self, system: System) -> None:
+        """Process PyPSA lines and convert to R2X format."""
+        if self.network is None:
+            return
+            
+        logger.info(f"Processing {len(self.network.lines)} lines")
+        
+        # Get time-varying data using get_switchable_as_dense
+        s_max_pu_t = self.network.get_switchable_as_dense('Line', 's_max_pu')
+        
+        for line_name, line_data in self.network.lines.iterrows():
+            try:
+                # Create PyPSA line component with all attributes
+                line = PypsaLine(
+                    # Required attributes
+                    name=line_name,
+                    bus0=line_data.get("bus0", "unknown"),
+                    bus1=line_data.get("bus1", "unknown"),
+                    
+                    # Static attributes
+                    type=safe_str(line_data.get("type")),
+                    x=safe_float(line_data.get("x", 0.0)),
+                    r=safe_float(line_data.get("r", 0.0)),
+                    g=safe_float(line_data.get("g", 0.0)),
+                    b=safe_float(line_data.get("b", 0.0)),
+                    s_nom=safe_float(line_data.get("s_nom", 0.0)),
+                    s_nom_mod=safe_float(line_data.get("s_nom_mod", 0.0)),
+                    s_nom_extendable=bool(line_data.get("s_nom_extendable", False)),
+                    s_nom_min=safe_float(line_data.get("s_nom_min", 0.0)),
+                    s_nom_max=safe_float(line_data.get("s_nom_max", float('inf'))),
+                    capital_cost=safe_float(line_data.get("capital_cost", 0.0)),
+                    active=bool(line_data.get("active", True)),
+                    build_year=int(line_data.get("build_year", 0)),
+                    lifetime=safe_float(line_data.get("lifetime", float('inf'))),
+                    length=safe_float(line_data.get("length", 0.0)),
+                    carrier=safe_str(line_data.get("carrier", "AC")),
+                    terrain_factor=safe_float(line_data.get("terrain_factor", 1.0)),
+                    num_parallel=safe_float(line_data.get("num_parallel", 1.0)),
+                    v_ang_min=safe_float(line_data.get("v_ang_min", float('-inf'))),
+                    v_ang_max=safe_float(line_data.get("v_ang_max", float('inf'))),
+                    
+                    # Time-varying attributes
+                    s_max_pu=get_ts_or_static(self.network, 'lines_t', 's_max_pu', line_name, s_max_pu_t, line_data, 1.0),
+                )
+                
+                # Add line to system
+                system.add_component(line)
+                logger.debug(f"Added line {line_name} from {line_data.get('bus0', 'unknown')} to {line_data.get('bus1', 'unknown')}")
+                
+            except Exception as e:
+                logger.warning(f"Failed to process line {line_name}: {e}")
+                continue
+
+    def _process_loads(self, system: System) -> None:
+        """Process PyPSA loads and convert to R2X format."""
+        if self.network is None:
+            return
+            
+        logger.info(f"Processing {len(self.network.loads)} loads")
+        
+        # Get time-varying data using get_switchable_as_dense
+        p_set_t = self.network.get_switchable_as_dense('Load', 'p_set')
+        q_set_t = self.network.get_switchable_as_dense('Load', 'q_set')
+        
+        for load_name, load_data in self.network.loads.iterrows():
+            try:
+                # Create PyPSA load component with all attributes
+                load = PypsaLoad(
+                    # Required attributes
+                    name=load_name,
+                    bus=load_data.get("bus", "unknown"),
+                    
+                    # Static attributes
+                    carrier=safe_str(load_data.get("carrier")),
+                    type=safe_str(load_data.get("type")),
+                    sign=safe_float(load_data.get("sign", -1.0)),
+                    active=bool(load_data.get("active", True)),
+                    
+                    # Time-varying attributes
+                    p_set=get_ts_or_static(self.network, 'loads_t', 'p_set', load_name, p_set_t, load_data, 0.0),
+                    q_set=get_ts_or_static(self.network, 'loads_t', 'q_set', load_name, q_set_t, load_data, 0.0),
+                )
+                
+                # Add load to system
+                system.add_component(load)
+                logger.debug(f"Added load {load_name} at bus {load_data.get('bus', 'unknown')}")
+                
+            except Exception as e:
+                logger.warning(f"Failed to process load {load_name}: {e}")
+                continue
+
+    def _process_stores(self, system: System) -> None:
+        """Process PyPSA stores and convert to R2X format."""
+        if self.network is None:
+            return
+            
+        logger.info(f"Processing {len(self.network.stores)} stores")
+        
+        # Get time-varying data using get_switchable_as_dense
+        available_attrs = set(self.network.stores.columns)
+        nan_default_attrs = {'e_set'}
+        
+        # Normal attributes (always exist)
+        e_min_pu_t = self.network.get_switchable_as_dense('Store', 'e_min_pu')
+        e_max_pu_t = self.network.get_switchable_as_dense('Store', 'e_max_pu')
+        q_set_t = self.network.get_switchable_as_dense('Store', 'q_set')
+        marginal_cost_t = self.network.get_switchable_as_dense('Store', 'marginal_cost')
+        marginal_cost_quadratic_t = self.network.get_switchable_as_dense('Store', 'marginal_cost_quadratic')
+        marginal_cost_storage_t = self.network.get_switchable_as_dense('Store', 'marginal_cost_storage')
+        standing_loss_t = self.network.get_switchable_as_dense('Store', 'standing_loss')
+        p_set_t = self.network.get_switchable_as_dense('Store', 'p_set')
+        
+        # NaN default attributes (may not exist)
+        e_set_t = self.network.get_switchable_as_dense('Store', 'e_set') if 'e_set' in available_attrs else None
+        
+        for store_name, store_data in self.network.stores.iterrows():
+            try:
+                # Create PyPSA store component with all attributes
+                store = PypsaStore(
+                    # Required attributes
+                    name=store_name,
+                    bus=store_data.get("bus", "unknown"),
+                    
+                    # Static attributes
+                    type=safe_str(store_data.get("type")),
+                    carrier=safe_str(store_data.get("carrier")),
+                    e_nom=safe_float(store_data.get("e_nom", 0.0)),
+                    e_nom_mod=safe_float(store_data.get("e_nom_mod", 0.0)),
+                    e_nom_extendable=bool(store_data.get("e_nom_extendable", False)),
+                    e_nom_min=safe_float(store_data.get("e_nom_min", 0.0)),
+                    e_nom_max=safe_float(store_data.get("e_nom_max", float('inf'))),
+                    e_initial=safe_float(store_data.get("e_initial", 0.0)),
+                    e_initial_per_period=bool(store_data.get("e_initial_per_period", False)),
+                    e_cyclic=bool(store_data.get("e_cyclic", False)),
+                    e_cyclic_per_period=bool(store_data.get("e_cyclic_per_period", True)),
+                    sign=safe_float(store_data.get("sign", 1.0)),
+                    capital_cost=safe_float(store_data.get("capital_cost", 0.0)),
+                    active=bool(store_data.get("active", True)),
+                    build_year=int(store_data.get("build_year", 0)),
+                    lifetime=safe_float(store_data.get("lifetime", float('inf'))),
+                    
+                    # Time-varying attributes
+                    e_min_pu=get_ts_or_static(self.network, 'stores_t', 'e_min_pu', store_name, e_min_pu_t, store_data, 0.0),
+                    e_max_pu=get_ts_or_static(self.network, 'stores_t', 'e_max_pu', store_name, e_max_pu_t, store_data, 1.0),
+                    p_set=get_ts_or_static(self.network, 'stores_t', 'p_set', store_name, p_set_t, store_data, float('nan')),
+                    q_set=get_ts_or_static(self.network, 'stores_t', 'q_set', store_name, q_set_t, store_data, 0.0),
+                    e_set=get_ts_or_static(self.network, 'stores_t', 'e_set', store_name, e_set_t, store_data, float('nan')),
+                    marginal_cost=get_ts_or_static(self.network, 'stores_t', 'marginal_cost', store_name, marginal_cost_t, store_data, 0.0),
+                    marginal_cost_quadratic=get_ts_or_static(self.network, 'stores_t', 'marginal_cost_quadratic', store_name, marginal_cost_quadratic_t, store_data, 0.0),
+                    marginal_cost_storage=get_ts_or_static(self.network, 'stores_t', 'marginal_cost_storage', store_name, marginal_cost_storage_t, store_data, 0.0),
+                    standing_loss=get_ts_or_static(self.network, 'stores_t', 'standing_loss', store_name, standing_loss_t, store_data, 0.0),
+                    
+                )
+                
+                # Add store to system
+                system.add_component(store)
+                logger.debug(f"Added store {store_name} at bus {store_data.get('bus', 'unknown')}")
+                
+            except Exception as e:
+                logger.warning(f"Failed to process store {store_name}: {e}")
                 continue
 
 
@@ -302,9 +549,17 @@ def main():
     buses = list(system.get_components(PypsaBus))
     generators = list(system.get_components(PypsaGenerator))
     storage_units = list(system.get_components(PypsaStorageUnit))
+    links = list(system.get_components(PypsaLink))
+    lines = list(system.get_components(PypsaLine))
+    loads = list(system.get_components(PypsaLoad))
+    stores = list(system.get_components(PypsaStore))
     logger.info(f"Buses: {len(buses)}")
     logger.info(f"Generators: {len(generators)}")
     logger.info(f"Storage Units: {len(storage_units)}")
+    logger.info(f"Links: {len(links)}")
+    logger.info(f"Lines: {len(lines)}")
+    logger.info(f"Loads: {len(loads)}")
+    logger.info(f"Stores: {len(stores)}")
     
     # Show first few buses
     if buses:
@@ -323,6 +578,31 @@ def main():
         logger.info("First 5 storage units:")
         for i, storage in enumerate(storage_units[:5]):
             logger.info(f"  {i+1}. {storage.name} ({storage.carrier}) - {storage.p_nom} MW")
+    
+    # Show first few links
+    if links:
+        logger.info("First 5 links:")
+        for i, link in enumerate(links[:5]):
+            logger.info(f"  {i+1}. {link.name} ({link.carrier}) - {link.p_nom} MW ({link.bus0} -> {link.bus1})")
+    
+    # Show first few lines
+    if lines:
+        logger.info("First 5 lines:")
+        for i, line in enumerate(lines[:5]):
+            logger.info(f"  {i+1}. {line.name} ({line.carrier}) - {line.s_nom} MVA ({line.bus0} -> {line.bus1})")
+    
+    # Show first few loads
+    if loads:
+        logger.info("First 5 loads:")
+        for i, load in enumerate(loads[:5]):
+            logger.info(f"  {i+1}. {load.name} ({load.carrier}) - {load.p_set} MW at {load.bus}")
+    
+    # Show first few stores
+    if stores:
+        logger.info("First 5 stores:")
+        for i, store in enumerate(stores[:5]):
+            logger.info(f"  {i+1}. {store.name} ({store.carrier}) - {store.e_nom} MWh at {store.bus}")
+    
     return system
 
 
