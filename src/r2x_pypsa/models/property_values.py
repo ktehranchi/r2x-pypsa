@@ -12,7 +12,7 @@ def get_ts_or_static(
     ts_object_name: str,
     attr: str,
     component_name: str,
-    dense_df: pd.DataFrame,
+    dense_df: Optional[pd.DataFrame],
     static_row: pd.Series,
     default: float,
 ):
@@ -28,8 +28,8 @@ def get_ts_or_static(
         Attribute name, e.g. "marginal_cost"
     component_name : str
         Name of the component, e.g. generator name
-    dense_df : pd.DataFrame
-        DataFrame from network.get_switchable_as_dense(component, attr)
+    dense_df : Optional[pd.DataFrame]
+        DataFrame from network.get_switchable_as_dense(component, attr), or None if attribute doesn't exist
     static_row : pd.Series
         Row from the static component table (e.g., n.generators.loc[name])
     default : float
@@ -45,7 +45,7 @@ def get_ts_or_static(
     ts_df = getattr(ts_object, attr, None) if ts_object else None
     
     # Use time series if it exists and has the component
-    if ts_df is not None and not ts_df.empty and component_name in ts_df.columns:
+    if dense_df is not None and ts_df is not None and not ts_df.empty and component_name in ts_df.columns:
         return dense_df[component_name]
 
     # Fall back to static value
