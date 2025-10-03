@@ -196,17 +196,20 @@ def test_time_varying_data(tmp_path):
     gen_static = next(gen for gen in generators if gen.name == "gen_static")
     gen_timevar = next(gen for gen in generators if gen.name == "gen_timevar")
     
-    # Check static generator (should be a scalar value under memory-efficient mode)
-    assert isinstance(gen_static.marginal_cost, (float, int))
-    assert float(gen_static.marginal_cost) == 50.0
+    # Check static generator (should be a PypsaProperty with time series)
+    from r2x_pypsa.models.property_values import PypsaProperty
+    assert isinstance(gen_static.marginal_cost, PypsaProperty)
+    assert gen_static.marginal_cost.get_value() == 50.0
+    assert gen_static.marginal_cost.time_series is not None
     
     # Check time-varying generator
-    assert isinstance(gen_timevar.marginal_cost, pd.Series)
-    assert len(gen_timevar.marginal_cost) == 4  # 4 time periods
-    assert gen_timevar.marginal_cost.iloc[0] == 0  # First hour
-    assert gen_timevar.marginal_cost.iloc[1] == 5  # Second hour
-    assert gen_timevar.marginal_cost.iloc[2] == 10  # Third hour
-    assert gen_timevar.marginal_cost.iloc[3] == 0  # Fourth hour
+    assert isinstance(gen_timevar.marginal_cost, PypsaProperty)
+    assert gen_timevar.marginal_cost.time_series is not None
+    assert len(gen_timevar.marginal_cost.time_series) == 4  # 4 time periods
+    assert gen_timevar.marginal_cost.time_series.iloc[0] == 0  # First hour
+    assert gen_timevar.marginal_cost.time_series.iloc[1] == 5  # Second hour
+    assert gen_timevar.marginal_cost.time_series.iloc[2] == 10  # Third hour
+    assert gen_timevar.marginal_cost.time_series.iloc[3] == 0  # Fourth hour
 
 def test_get_series_only_function():
     """Test the get_series_only helper function directly."""
@@ -253,11 +256,12 @@ def test_generator_attributes(simple_parser: PypsaParser) -> None:
         assert hasattr(gen, 'marginal_cost')
         assert hasattr(gen, 'uuid')
         assert gen.uuid is not None  # UUID should be auto-generated
-        # Time-varying attributes may be float (static) or Series (TS)
-        assert isinstance(gen.marginal_cost, (float, pd.Series))
-        assert isinstance(gen.efficiency, (float, pd.Series))
-        assert isinstance(gen.p_max_pu, (float, pd.Series))
-        assert isinstance(gen.p_min_pu, (float, pd.Series))
+        # Time-varying attributes are now PypsaProperty objects
+        from r2x_pypsa.models.property_values import PypsaProperty
+        assert isinstance(gen.marginal_cost, PypsaProperty)
+        assert isinstance(gen.efficiency, PypsaProperty)
+        assert isinstance(gen.p_max_pu, PypsaProperty)
+        assert isinstance(gen.p_min_pu, PypsaProperty)
 
 
 def test_all_generator_attributes_present(simple_parser: PypsaParser) -> None:
@@ -329,40 +333,40 @@ def test_generator_attribute_defaults(simple_parser: PypsaParser) -> None:
     gen = generators[0]
     
     # Test default values for static attributes
-    assert gen.control == "PQ"  # Default control strategy
-    assert gen.p_nom_extendable is False  # Default not extendable
-    assert gen.p_nom_min == 0.0  # Default minimum
-    assert gen.p_nom_max == float('inf')  # Default maximum
-    assert gen.e_sum_min == float('-inf')  # Default minimum energy
-    assert gen.e_sum_max == float('inf')  # Default maximum energy
-    assert gen.sign == 1.0  # Default sign
-    assert gen.active is True  # Default active
-    assert gen.build_year == 0  # Default build year
-    assert gen.lifetime == float('inf')  # Default lifetime
-    assert gen.capital_cost == 0.0  # Default capital cost
+    assert gen.control.get_value() == "PQ"  # Default control strategy
+    assert gen.p_nom_extendable.get_value() is False  # Default not extendable
+    assert gen.p_nom_min.get_value() == 0.0  # Default minimum
+    assert gen.p_nom_max.get_value() == float('inf')  # Default maximum
+    assert gen.e_sum_min.get_value() == float('-inf')  # Default minimum energy
+    assert gen.e_sum_max.get_value() == float('inf')  # Default maximum energy
+    assert gen.sign.get_value() == 1.0  # Default sign
+    assert gen.active.get_value() is True  # Default active
+    assert gen.build_year.get_value() == 0  # Default build year
+    assert gen.lifetime.get_value() == float('inf')  # Default lifetime
+    assert gen.capital_cost.get_value() == 0.0  # Default capital cost
     
     # Test default values for unit commitment attributes
-    assert gen.committable is False  # Default not committable
-    assert gen.start_up_cost == 0.0  # Default start up cost
-    assert gen.shut_down_cost == 0.0  # Default shut down cost
-    assert gen.stand_by_cost == 0.0  # Default stand by cost
-    assert gen.min_up_time == 0  # Default min up time
-    assert gen.min_down_time == 0  # Default min down time
-    assert gen.up_time_before == 1  # Default up time before
-    assert gen.down_time_before == 0  # Default down time before
-    assert gen.ramp_limit_start_up == 1.0  # Default ramp limit start up
-    assert gen.ramp_limit_shut_down == 1.0  # Default ramp limit shut down
-    assert gen.weight == 1.0  # Default weight
+    assert gen.committable.get_value() is False  # Default not committable
+    assert gen.start_up_cost.get_value() == 0.0  # Default start up cost
+    assert gen.shut_down_cost.get_value() == 0.0  # Default shut down cost
+    assert gen.stand_by_cost.get_value() == 0.0  # Default stand by cost
+    assert gen.min_up_time.get_value() == 0  # Default min up time
+    assert gen.min_down_time.get_value() == 0  # Default min down time
+    assert gen.up_time_before.get_value() == 1  # Default up time before
+    assert gen.down_time_before.get_value() == 0  # Default down time before
+    assert gen.ramp_limit_start_up.get_value() == 1.0  # Default ramp limit start up
+    assert gen.ramp_limit_shut_down.get_value() == 1.0  # Default ramp limit shut down
+    assert gen.weight.get_value() == 1.0  # Default weight
     
     # Test default values for time-varying attributes
-    assert gen.p_min_pu == 0.0  # Default minimum power
-    assert gen.p_max_pu == 1.0  # Default maximum power
-    assert gen.p_set == 0.0  # Default power set point
-    assert gen.q_set == 0.0  # Default reactive power set point
-    assert gen.marginal_cost == 0.0  # Default marginal cost
-    assert gen.marginal_cost_quadratic == 0.0  # Default quadratic marginal cost
-    assert gen.efficiency == 1.0  # Default efficiency
-    assert gen.stand_by_cost == 0.0  # Default stand by cost
+    assert gen.p_min_pu.get_value() == 0.0  # Default minimum power
+    assert gen.p_max_pu.get_value() == 1.0  # Default maximum power
+    assert gen.p_set.get_value() == 0.0  # Default power set point
+    assert gen.q_set.get_value() == 0.0  # Default reactive power set point
+    assert gen.marginal_cost.get_value() == 0.0  # Default marginal cost
+    assert gen.marginal_cost_quadratic.get_value() == 0.0  # Default quadratic marginal cost
+    assert gen.efficiency.get_value() == 1.0  # Default efficiency
+    assert gen.stand_by_cost.get_value() == 0.0  # Default stand by cost
 
 
 def test_generator_unit_commitment_attributes(tmp_path):
@@ -404,15 +408,15 @@ def test_generator_unit_commitment_attributes(tmp_path):
     gen = generators[0]
     
     # Test unit commitment attributes are properly set
-    assert gen.committable is True
-    assert gen.start_up_cost == 1000.0
-    assert gen.shut_down_cost == 500.0
-    assert gen.min_up_time == 2
-    assert gen.min_down_time == 1
-    assert gen.up_time_before == 1
-    assert gen.down_time_before == 0
-    assert gen.ramp_limit_start_up == 0.5
-    assert gen.ramp_limit_shut_down == 0.3
+    assert gen.committable.get_value() is True
+    assert gen.start_up_cost.get_value() == 1000.0
+    assert gen.shut_down_cost.get_value() == 500.0
+    assert gen.min_up_time.get_value() == 2
+    assert gen.min_down_time.get_value() == 1
+    assert gen.up_time_before.get_value() == 1
+    assert gen.down_time_before.get_value() == 0
+    assert gen.ramp_limit_start_up.get_value() == 0.5
+    assert gen.ramp_limit_shut_down.get_value() == 0.3
 
 
 
@@ -429,25 +433,27 @@ def test_bus_parsing(simple_netcdf_file):
     
     # Check first bus attributes
     bus1 = next(bus for bus in buses if bus.name == "bus1")
-    assert bus1.carrier == "AC"
-    assert bus1.v_nom == 138.0
-    assert bus1.x == 0.0
-    assert bus1.y == 0.0
+    assert bus1.carrier.get_value() == "AC"
+    assert bus1.v_nom.get_value() == 138.0
+    assert bus1.x.get_value() == 0.0
+    assert bus1.y.get_value() == 0.0
 
 
 def test_bus_model_creation():
     """Test PypsaBus model creation with minimal attributes."""
+    from r2x_pypsa.models.property_values import PypsaProperty
+    
     bus = PypsaBus(
         name="test_bus",
-        carrier="DC",
-        v_nom=500.0
+        carrier=PypsaProperty.create(value="DC"),
+        v_nom=PypsaProperty.create(value=500.0, units="kV")
     )
     
     assert bus.name == "test_bus"
-    assert bus.carrier == "DC"
-    assert bus.v_nom == 500.0
-    assert bus.x == 0.0  # default
-    assert bus.y == 0.0  # default
+    assert bus.carrier.get_value() == "DC"
+    assert bus.v_nom.get_value() == 500.0
+    assert bus.x.get_value() == 0.0  # default
+    assert bus.y.get_value() == 0.0  # default
 
 
 def test_storage_unit_parsing(simple_netcdf_file):
@@ -462,39 +468,41 @@ def test_storage_unit_parsing(simple_netcdf_file):
     # Check first storage unit attributes
     storage1 = next(storage for storage in storage_units if storage.name == "storage1")
     assert storage1.bus == "bus1"
-    assert storage1.carrier == "battery"
-    assert storage1.p_nom == 25.0
-    assert storage1.max_hours == 4.0
-    assert storage1.efficiency_store == 0.9
-    assert storage1.efficiency_dispatch == 0.9
-    assert storage1.marginal_cost == 5.0
+    assert storage1.carrier.get_value() == "battery"
+    assert storage1.p_nom.get_value() == 25.0
+    assert storage1.max_hours.get_value() == 4.0
+    assert storage1.efficiency_store.get_value() == pytest.approx(0.9)
+    assert storage1.efficiency_dispatch.get_value() == pytest.approx(0.9)
+    assert storage1.marginal_cost.get_value() == 5.0
     
     # Check second storage unit attributes
     storage2 = next(storage for storage in storage_units if storage.name == "storage2")
     assert storage2.bus == "bus2"
-    assert storage2.carrier == "pumped_hydro"
-    assert storage2.p_nom == 100.0
-    assert storage2.max_hours == 8.0
-    assert storage2.efficiency_store == 0.8
-    assert storage2.efficiency_dispatch == 0.8
-    assert storage2.marginal_cost == 2.0
+    assert storage2.carrier.get_value() == "pumped_hydro"
+    assert storage2.p_nom.get_value() == 100.0
+    assert storage2.max_hours.get_value() == 8.0
+    assert storage2.efficiency_store.get_value() == pytest.approx(0.8)
+    assert storage2.efficiency_dispatch.get_value() == pytest.approx(0.8)
+    assert storage2.marginal_cost.get_value() == 2.0
 
 
 def test_storage_unit_model_creation():
     """Test PypsaStorageUnit model creation with minimal attributes."""
+    from r2x_pypsa.models.property_values import PypsaProperty
+    
     storage = PypsaStorageUnit(
         name="test_storage",
         bus="bus1",
-        p_nom=50.0,
-        max_hours=4.0
+        p_nom=PypsaProperty.create(value=50.0, units="MW"),
+        max_hours=PypsaProperty.create(value=4.0, units="hours")
     )
     
     assert storage.name == "test_storage"
     assert storage.bus == "bus1"
-    assert storage.p_nom == 50.0
-    assert storage.max_hours == 4.0
-    assert storage.p_nom_extendable is False  # default
-    assert storage.cyclic_state_of_charge is False  # default
+    assert storage.p_nom.get_value() == 50.0
+    assert storage.max_hours.get_value() == 4.0
+    assert storage.p_nom_extendable.get_value() is False  # default
+    assert storage.cyclic_state_of_charge.get_value() is False  # default
 
 
 def test_link_parsing(simple_netcdf_file):
@@ -510,38 +518,40 @@ def test_link_parsing(simple_netcdf_file):
     link1 = next(link for link in links if link.name == "link1")
     assert link1.bus0 == "bus1"
     assert link1.bus1 == "bus2"
-    assert link1.carrier == "HVDC"
-    assert link1.p_nom == 50.0
-    assert link1.efficiency == 0.95
-    assert link1.marginal_cost == 1.0
+    assert link1.carrier.get_value() == "HVDC"
+    assert link1.p_nom.get_value() == 50.0
+    assert link1.efficiency.get_value() == pytest.approx(0.95)
+    assert link1.marginal_cost.get_value() == 1.0
     
     # Check second link attributes
     link2 = next(link for link in links if link.name == "link2")
     assert link2.bus0 == "bus2"
     assert link2.bus1 == "bus1"
-    assert link2.carrier == "converter"
-    assert link2.p_nom == 30.0
-    assert link2.efficiency == 0.98
-    assert link2.marginal_cost == 0.5
+    assert link2.carrier.get_value() == "converter"
+    assert link2.p_nom.get_value() == 30.0
+    assert link2.efficiency.get_value() == pytest.approx(0.98)
+    assert link2.marginal_cost.get_value() == 0.5
 
 
 def test_link_model_creation():
     """Test PypsaLink model creation with minimal attributes."""
+    from r2x_pypsa.models.property_values import PypsaProperty
+    
     link = PypsaLink(
         name="test_link",
         bus0="bus1",
         bus1="bus2",
-        p_nom=100.0,
-        efficiency=0.9
+        p_nom=PypsaProperty.create(value=100.0, units="MW"),
+        efficiency=PypsaProperty.create(value=0.9)
     )
     
     assert link.name == "test_link"
     assert link.bus0 == "bus1"
     assert link.bus1 == "bus2"
-    assert link.p_nom == 100.0
-    assert link.efficiency == 0.9
-    assert link.active is True  # default
-    assert link.committable is False  # default
+    assert link.p_nom.get_value() == 100.0
+    assert link.efficiency.get_value() == 0.9
+    assert link.active.get_value() is True  # default
+    assert link.committable.get_value() is False  # default
 
 
 def test_line_parsing(simple_netcdf_file):
@@ -574,23 +584,25 @@ def test_line_parsing(simple_netcdf_file):
 
 def test_line_model_creation():
     """Test PypsaLine model creation with minimal attributes."""
+    from r2x_pypsa.models.property_values import PypsaProperty
+    
     line = PypsaLine(
         name="test_line",
         bus0="bus1",
         bus1="bus2",
-        x=0.2,
-        r=0.05,
-        s_nom=150.0
+        x=PypsaProperty.create(value=0.2),
+        r=PypsaProperty.create(value=0.05),
+        s_nom=PypsaProperty.create(value=150.0)
     )
     
     assert line.name == "test_line"
     assert line.bus0 == "bus1"
     assert line.bus1 == "bus2"
-    assert line.x == 0.2
-    assert line.r == 0.05
-    assert line.s_nom == 150.0
-    assert line.carrier == "AC"  # default
-    assert line.active is True  # default
+    assert line.x.get_value() == 0.2
+    assert line.r.get_value() == 0.05
+    assert line.s_nom.get_value() == 150.0
+    assert line.carrier.get_value() == "AC"  # default
+    assert line.active.get_value() is True  # default
 
 
 def test_load_parsing(simple_netcdf_file):
@@ -619,19 +631,21 @@ def test_load_parsing(simple_netcdf_file):
 
 def test_load_model_creation():
     """Test PypsaLoad model creation with minimal attributes."""
+    from r2x_pypsa.models.property_values import PypsaProperty
+    
     load = PypsaLoad(
         name="test_load",
         bus="bus1",
-        p_set=25.0,
-        q_set=6.0
+        p_set=PypsaProperty.create(value=25.0, units="MW"),
+        q_set=PypsaProperty.create(value=6.0)
     )
     
     assert load.name == "test_load"
     assert load.bus == "bus1"
-    assert load.p_set == 25.0
-    assert load.q_set == 6.0
-    assert load.sign == -1.0  # default
-    assert load.active is True  # default
+    assert load.p_set.get_value() == 25.0
+    assert load.q_set.get_value() == 6.0
+    assert load.sign.get_value() == -1.0  # default
+    assert load.active.get_value() is True  # default
 
 
 def test_store_parsing(simple_netcdf_file):
@@ -662,19 +676,21 @@ def test_store_parsing(simple_netcdf_file):
 
 def test_store_model_creation():
     """Test PypsaStore model creation with minimal attributes."""
+    from r2x_pypsa.models.property_values import PypsaProperty
+    
     store = PypsaStore(
         name="test_store",
         bus="bus1",
-        e_nom=75.0,
-        marginal_cost=1.5
+        e_nom=PypsaProperty.create(value=75.0, units="MWh"),
+        marginal_cost=PypsaProperty.create(value=1.5, units="usd/MWh")
     )
     
     assert store.name == "test_store"
     assert store.bus == "bus1"
-    assert store.e_nom == 75.0
-    assert store.marginal_cost == 1.5
-    assert store.e_nom_extendable is False  # default
-    assert store.e_cyclic is False  # default
-    assert store.active is True  # default
+    assert store.e_nom.get_value() == 75.0
+    assert store.marginal_cost.get_value() == 1.5
+    assert store.e_nom_extendable.get_value() is False  # default
+    assert store.e_cyclic.get_value() is False  # default
+    assert store.active.get_value() is True  # default
 
 

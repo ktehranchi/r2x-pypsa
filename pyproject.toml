@@ -7,7 +7,9 @@ dependencies = [
     "r2x>=1.1.0",
     "pypsa==0.35.2",
     "pandas",
-    "loguru"
+    "loguru",
+    "ipython>=9.6.0",
+    "pytest>=8.4.2",
 ]
 requires-python = ">=3.11"
 
