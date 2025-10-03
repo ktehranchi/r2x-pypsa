@@ -7,14 +7,11 @@ dependencies = [
     "r2x>=1.1.0",
     "pypsa==0.35.2",
     "pandas",
-    "loguru"
+    "loguru",
+    "ipython>=9.6.0",
+    "pytest>=8.4.2",
 ]
 requires-python = ">=3.11"
-
-[project.optional-dependencies]
-dev = [
-    "pytest"
-]
 
 [tool.uv.sources]
 r2x = { git = "https://github.com/NREL/r2x", branch = "v2.0.0" }
