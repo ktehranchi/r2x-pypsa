@@ -13,11 +13,6 @@ dependencies = [
 ]
 requires-python = ">=3.11"
 
-[project.optional-dependencies]
-dev = [
-    "pytest"
-]
-
 [tool.uv.sources]
 r2x = { git = "https://github.com/NREL/r2x", branch = "v2.0.0" }
 

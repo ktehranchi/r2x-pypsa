@@ -27,10 +27,6 @@ class PypsaProperty(BaseModel):
     # Time series data
     time_series: Optional[pd.Series] = None
 
-    # Reference information
-    datafile_name: Optional[str] = None
-    datafile_id: Optional[int] = None
-    column_name: Optional[str] = None
 
     # Metadata for validation and constraints
     min_value: Optional[float] = None
