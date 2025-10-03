@@ -1,10 +1,10 @@
 import pytest
 from r2x_pypsa.models import PypsaGenerator
+from r2x_pypsa.models.property_values import PypsaProperty
 
 
 def test_pypsa_generator():
     """Test PypsaGenerator model creation and properties."""
-    from r2x_pypsa.models.property_values import PypsaProperty
     
     generator = PypsaGenerator(
         name="test_gen",
@@ -25,7 +25,6 @@ def test_pypsa_generator():
 
 def test_pypsa_generator_defaults():
     """Test PypsaGenerator with default values."""
-    from r2x_pypsa.models.property_values import PypsaProperty
     
     generator = PypsaGenerator(
         name="test_gen",
@@ -45,7 +44,6 @@ def test_pypsa_generator_defaults():
 
 def test_pypsa_generator_uuid_generation():
     """Test that UUID is auto-generated when not provided."""
-    from r2x_pypsa.models.property_values import PypsaProperty
     
     gen1 = PypsaGenerator(name="gen1", bus="bus1", carrier=PypsaProperty.create(value="solar"))
     gen2 = PypsaGenerator(name="gen2", bus="bus1", carrier=PypsaProperty.create(value="wind"))
