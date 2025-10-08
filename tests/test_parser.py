@@ -53,7 +53,7 @@ def simple_netcdf_file(tmp_path):
     n.add("Store", "store2", bus="bus2", carrier="heat", e_nom=50, marginal_cost=1, standing_loss=0.02)
     
     # Save to temporary NetCDF file
-    netcdf_path = tmp_path / "test_network.nc"
+    netcdf_path = tmp_path / "test_simple_network.nc"
     n.export_to_netcdf(netcdf_path)
     
     return str(netcdf_path)
@@ -107,7 +107,7 @@ def test_build_system(simple_parser: PypsaParser) -> None:
 def test_real_pypsa_file():
     """Test parser with real PyPSA network file."""
     # Use the real PyPSA file from tests/data (we can change this file later)
-    real_netcdf_file = Path(__file__).parent / "data" / "elec_s10_c8_ec_lv1.0_REM-3h_E.nc"
+    real_netcdf_file = Path(__file__).parent / "data" / "test_network.nc"
     
     # Verify file exists
     assert real_netcdf_file.exists(), f"Test file not found: {real_netcdf_file}"
@@ -127,7 +127,7 @@ def test_real_pypsa_file():
     generators = list(system.get_components(PypsaGenerator))
     
     # Verify we have generators (real network should have many)
-    assert len(generators) == 98, "Network should have 98 generators"
+    assert len(generators) == 85, "Network should have 85 generators"
     
     
     # Test that generators have proper attributes

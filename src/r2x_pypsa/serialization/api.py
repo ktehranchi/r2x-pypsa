@@ -5,6 +5,14 @@ from typing import Any, Dict
 
 from loguru import logger
 from r2x.api import System
+from r2x.models import (
+    ThermalStandard,
+    RenewableDispatch,
+    HydroDispatch,
+    EnergyReservoirStorage,
+    HydroPumpedStorage,
+)
+from r2x.enums import PrimeMoversType, ThermalFuels
 
 from r2x_pypsa.serialization.pypsa_to_psy import pypsa_component_to_psy
 from r2x_pypsa.serialization.to_sienna import infrasys_to_psy
@@ -61,71 +69,71 @@ def create_default_mapping() -> Dict[str, Any]:
     return {
         "generator_mapping": {
             # Standard PyPSA carriers (from PyPSA examples and documentation)
-            "coal": "ThermalStandard",
-            "gas": "ThermalStandard", 
-            "nuclear": "ThermalStandard",
-            "oil": "ThermalStandard",
-            "biomass": "ThermalStandard",
-            "waste": "ThermalStandard",
-            "geothermal": "ThermalStandard",
+            "coal": ThermalStandard,
+            "gas": ThermalStandard, 
+            "nuclear": ThermalStandard,
+            "oil": ThermalStandard,
+            "biomass": ThermalStandard,
+            "waste": ThermalStandard,
+            "geothermal": ThermalStandard,
             
             # Renewable carriers
-            "solar": "RenewableDispatch",
-            "onwind": "RenewableDispatch",
-            "offwind": "RenewableDispatch",
-            "offwind_floating": "RenewableDispatch", 
-            "hydro": "HydroDispatch",
+            "solar": RenewableDispatch,
+            "onwind": RenewableDispatch,
+            "offwind": RenewableDispatch,
+            "offwind_floating": RenewableDispatch, 
+            "hydro": HydroDispatch,
             
             # Storage carriers
-            "battery": "EnergyReservoirStorage",
-            "pumped_hydro": "HydroPumpedStorage",
+            "battery": EnergyReservoirStorage,
+            "pumped_hydro": HydroPumpedStorage,
             
             # Gas turbine variants (common in PyPSA examples)
-            "OCGT": "ThermalStandard",  # Open Cycle Gas Turbine
-            "CCGT": "ThermalStandard",  # Combined Cycle Gas Turbine
+            "OCGT": ThermalStandard,  # Open Cycle Gas Turbine
+            "CCGT": ThermalStandard,  # Combined Cycle Gas Turbine
             
             # Other common carriers
-            "other": "ThermalStandard",
+            "other": ThermalStandard,
         },
         "prime_mover_mapping": {
             # Map to standard prime mover types
-            "coal": "ST",  # Steam Turbine
-            "gas": "GT",   # Gas Turbine
-            "nuclear": "ST",  # Steam Turbine
-            "oil": "IC",   # Internal Combustion
-            "biomass": "BT",  # Biomass Turbine
-            "waste": "ST",  # Steam Turbine
-            "geothermal": "OT",  # Other
-            "solar": "PVe",  # Photovoltaic
-            "onwind": "WT",   # Wind Turbine
-            "offwind": "WT",  # Wind Turbine
-            "offwind_floating": "WT",  # Wind Turbine
-            "hydro": "HY",  # Hydro
-            "battery": "BA",  # Battery
-            "pumped_hydro": "HY",  # Hydro
-            "OCGT": "GT",  # Gas Turbine
-            "CCGT": "GT",  # Gas Turbine
-            "other": "OT",  # Other
+            "coal": PrimeMoversType.ST,  # Steam Turbine
+            "gas": PrimeMoversType.GT,   # Gas Turbine
+            "nuclear": PrimeMoversType.ST,  # Steam Turbine
+            "oil": PrimeMoversType.IC,   # Internal Combustion
+            "biomass": PrimeMoversType.BT,  # Biomass Turbine
+            "waste": PrimeMoversType.ST,  # Steam Turbine
+            "geothermal": PrimeMoversType.OT,  # Other
+            "solar": PrimeMoversType.PVe,  # Photovoltaic
+            "onwind": PrimeMoversType.WT,   # Wind Turbine
+            "offwind": PrimeMoversType.WT,  # Wind Turbine
+            "offwind_floating": PrimeMoversType.WT,  # Wind Turbine
+            "hydro": PrimeMoversType.HY,  # Hydro
+            "battery": PrimeMoversType.BA,  # Battery
+            "pumped_hydro": PrimeMoversType.HY,  # Hydro
+            "OCGT": PrimeMoversType.GT,  # Gas Turbine
+            "CCGT": PrimeMoversType.GT,  # Gas Turbine
+            "other": PrimeMoversType.OT,  # Other
         },
         "fuel_mapping": {
             # Map to standard fuel types
-            "coal": "COAL",
-            "gas": "NATURAL_GAS",
-            "nuclear": "NUCLEAR",
-            "oil": "DISTILLATE_FUEL_OIL",
-            "biomass": "OTHER",
-            "waste": "OTHER",
-            "geothermal": "GEOTHERMAL",
-            "solar": "OTHER",
-            "onwind": "OTHER",
-            "offwind": "OTHER",
-            "offwind_floating": "OTHER",
-            "hydro": "OTHER",
-            "battery": "OTHER",
-            "pumped_hydro": "OTHER",
-            "OCGT": "NATURAL_GAS",
-            "CCGT": "NATURAL_GAS",
-            "other": "OTHER",
+            "coal": ThermalFuels.COAL,
+            "gas": ThermalFuels.NATURAL_GAS,
+            "nuclear": ThermalFuels.NUCLEAR,
+            "oil": ThermalFuels.DISTILLATE_FUEL_OIL,
+            "biomass": ThermalFuels.OTHER,
+            "waste": ThermalFuels.OTHER,
+            "geothermal": ThermalFuels.GEOTHERMAL,
+            "solar": ThermalFuels.OTHER,
+            "onwind": ThermalFuels.OTHER,
+            "offwind": ThermalFuels.OTHER,
+            "offwind_floating": ThermalFuels.OTHER,
+            "hydro": ThermalFuels.OTHER,
+            "battery": ThermalFuels.OTHER,
+            "pumped_hydro": ThermalFuels.OTHER,
+            "OCGT": ThermalFuels.NATURAL_GAS,
+            "CCGT": ThermalFuels.NATURAL_GAS,
+            "other": ThermalFuels.OTHER,
         },
     }
 
