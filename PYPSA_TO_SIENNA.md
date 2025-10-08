@@ -2,6 +2,16 @@
 
 This guide explains how to use the `r2x-pypsa` parser to convert PyPSA network files (NetCDF format) to Sienna JSON format, which is compatible with PowerSystems.jl and other Sienna tools.
 
+## About the Parser
+
+The main parser implementation is located in `src/r2x_pypsa/parser.py` and provides the `PypsaParser` class. This class handles:
+- Loading PyPSA networks from NetCDF files
+- Parsing all PyPSA component types (buses, generators, loads, lines, links, storage, etc.)
+- Converting static and time-varying attributes
+- Building an R2X System that can be exported to Sienna format
+
+The serialization functionality (converting to Sienna JSON) is in `src/r2x_pypsa/serialization/`.
+
 ## Table of Contents
 - [Overview](#overview)
 - [Prerequisites](#prerequisites)
