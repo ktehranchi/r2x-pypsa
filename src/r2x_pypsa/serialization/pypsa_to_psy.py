@@ -29,6 +29,7 @@ from r2x_pypsa.models.generator import PypsaGenerator
 from r2x_pypsa.models.line import PypsaLine
 from r2x_pypsa.models.load import PypsaLoad
 from r2x_pypsa.models.storage_unit import PypsaStorageUnit
+from r2x_pypsa.models.link import PypsaLink
 from r2x_pypsa.serialization.cost_models import create_operational_cost
 from r2x_pypsa.serialization.utils import (
     get_pypsa_property,
@@ -403,3 +404,97 @@ def _(
             elif property_name == "p_min_pu":
                 ts.name = "min_active_power"
             psy_system.add_time_series(ts, battery)
+
+
+@pypsa_component_to_psy.register
+def _(
+    component: PypsaLink,
+    pypsa_system: System,
+    psy_system: System,
+    mapping: dict[str, Any] | None = None,
+):
+    """Convert a PypsaLink to AreaInterchange objects.
+    
+    Logic: If lines exist, do not create area interchange objects.
+    Else: create with forward and reverse links.
+    """
+    # Check if any lines exist in the system
+    lines_exist = any(
+        isinstance(comp, PypsaLine) 
+        for comp in pypsa_system._component_mgr.iter_all()
+    )
+    
+    if lines_exist:
+        logger.trace(f"Lines exist in system, skipping link {component.name}")
+        return
+    
+    # Get bus connections
+    bus0_name = get_pypsa_property(pypsa_system, component, "bus0")
+    bus1_name = get_pypsa_property(pypsa_system, component, "bus1")
+    
+    if not bus0_name or not bus1_name:
+        logger.warning(f"Link {component.name} missing bus connections")
+        return
+
+    # Create areas for the buses
+    from_area = Area(
+        name=f"{bus0_name}_area",
+        uuid=f"{bus0_name}_area_uuid"
+    )
+    to_area = Area(
+        name=f"{bus1_name}_area", 
+        uuid=f"{bus1_name}_area_uuid"
+    )
+
+    # Check if areas already exist
+    if not psy_system.list_components_by_name(Area, from_area.name):
+        psy_system.add_component(from_area)
+    else:
+        from_area = psy_system.get_component(Area, from_area.name)
+
+    if not psy_system.list_components_by_name(Area, to_area.name):
+        psy_system.add_component(to_area)
+    else:
+        to_area = psy_system.get_component(Area, to_area.name)
+
+    # Get link parameters
+    p_nom = get_pypsa_property(pypsa_system, component, "p_nom") or 0.0
+    efficiency = get_pypsa_property(pypsa_system, component, "efficiency") or 1.0
+    
+    if p_nom <= 0:
+        logger.warning(f"Link {component.name} has invalid capacity")
+        return
+
+    # Create forward link (bus0 -> bus1)
+    forward_interchange = AreaInterchange(
+        name=f"{component.name}_forward",
+        active_power_flow=0,
+        from_area=from_area,
+        to_area=to_area,
+        flow_limits=FromTo_ToFrom(from_to=p_nom, to_from=p_nom * efficiency),
+    )
+    forward_interchange.services = []
+    psy_system.add_component(forward_interchange)
+
+    # Create reverse link (bus1 -> bus0)
+    reverse_interchange = AreaInterchange(
+        name=f"{component.name}_reverse",
+        active_power_flow=0,
+        from_area=to_area,
+        to_area=from_area,
+        flow_limits=FromTo_ToFrom(from_to=p_nom * efficiency, to_from=p_nom),
+    )
+    reverse_interchange.services = []
+    psy_system.add_component(reverse_interchange)
+
+    # Add time series if they exist
+    for property_name in ["p_set", "marginal_cost"]:
+        if pypsa_system.has_time_series(component, property_name):
+            ts = pypsa_system.get_time_series(component, property_name)
+            if property_name == "p_set":
+                ts.name = "active_power"
+            elif property_name == "marginal_cost":
+                ts.name = "operation_cost"
+            # Add time series to both forward and reverse interchanges
+            psy_system.add_time_series(ts, forward_interchange)
+            psy_system.add_time_series(ts, reverse_interchange)

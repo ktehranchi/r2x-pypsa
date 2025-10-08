@@ -50,6 +50,8 @@ def pypsa_to_sienna(
 
 def create_default_mapping() -> Dict[str, Any]:
     """Create a default mapping configuration for PyPSA to PSY conversion.
+    
+    Based on PyPSA's standard carrier naming conventions.
 
     Returns
     -------
@@ -58,37 +60,55 @@ def create_default_mapping() -> Dict[str, Any]:
     """
     return {
         "generator_mapping": {
-            # Map PyPSA carriers to PSY generator types
+            # Standard PyPSA carriers (from PyPSA examples and documentation)
             "coal": "ThermalStandard",
             "gas": "ThermalStandard", 
             "nuclear": "ThermalStandard",
             "oil": "ThermalStandard",
             "biomass": "ThermalStandard",
             "waste": "ThermalStandard",
-            "solar": "RenewableDispatch",
-            "wind": "RenewableDispatch",
-            "hydro": "HydroDispatch",
             "geothermal": "ThermalStandard",
+            
+            # Renewable carriers
+            "solar": "RenewableDispatch",
+            "onwind": "RenewableDispatch",
+            "offwind": "RenewableDispatch",
+            "offwind_floating": "RenewableDispatch", 
+            "hydro": "HydroDispatch",
+            
+            # Storage carriers
             "battery": "EnergyReservoirStorage",
             "pumped_hydro": "HydroPumpedStorage",
+            
+            # Gas turbine variants (common in PyPSA examples)
+            "OCGT": "ThermalStandard",  # Open Cycle Gas Turbine
+            "CCGT": "ThermalStandard",  # Combined Cycle Gas Turbine
+            
+            # Other common carriers
+            "other": "ThermalStandard",
         },
         "prime_mover_mapping": {
-            # Map PyPSA carriers to PSY prime mover types
+            # Map to standard prime mover types
             "coal": "ST",  # Steam Turbine
             "gas": "GT",   # Gas Turbine
             "nuclear": "ST",  # Steam Turbine
             "oil": "IC",   # Internal Combustion
             "biomass": "BT",  # Biomass Turbine
             "waste": "ST",  # Steam Turbine
-            "solar": "PVe",  # Photovoltaic
-            "wind": "WT",   # Wind Turbine
-            "hydro": "HY",  # Hydro
             "geothermal": "OT",  # Other
+            "solar": "PVe",  # Photovoltaic
+            "onwind": "WT",   # Wind Turbine
+            "offwind": "WT",  # Wind Turbine
+            "offwind_floating": "WT",  # Wind Turbine
+            "hydro": "HY",  # Hydro
             "battery": "BA",  # Battery
             "pumped_hydro": "HY",  # Hydro
+            "OCGT": "GT",  # Gas Turbine
+            "CCGT": "GT",  # Gas Turbine
+            "other": "OT",  # Other
         },
         "fuel_mapping": {
-            # Map PyPSA carriers to PSY fuel types
+            # Map to standard fuel types
             "coal": "COAL",
             "gas": "NATURAL_GAS",
             "nuclear": "NUCLEAR",
@@ -96,6 +116,16 @@ def create_default_mapping() -> Dict[str, Any]:
             "biomass": "OTHER",
             "waste": "OTHER",
             "geothermal": "GEOTHERMAL",
+            "solar": "OTHER",
+            "onwind": "OTHER",
+            "offwind": "OTHER",
+            "offwind_floating": "OTHER",
+            "hydro": "OTHER",
+            "battery": "OTHER",
+            "pumped_hydro": "OTHER",
+            "OCGT": "NATURAL_GAS",
+            "CCGT": "NATURAL_GAS",
+            "other": "OTHER",
         },
     }
 
