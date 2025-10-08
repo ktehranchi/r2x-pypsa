@@ -37,8 +37,13 @@ def get_pypsa_property(system: System, component: PypsaDevice, property_name: st
             time_series = system.get_time_series(component, property_name)
             return float(max(time_series.data))
         
-        # Return static property value
-        return component_property.get_value()
+        # Handle different property types
+        if hasattr(component_property, 'get_value'):
+            # PypsaProperty object
+            return component_property.get_value()
+        else:
+            # Direct value (string, float, etc.)
+            return component_property
     except AttributeError:
         logger.warning(f"Property {property_name} not found on {component.name}")
         return None

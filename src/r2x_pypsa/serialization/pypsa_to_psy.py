@@ -312,6 +312,7 @@ def _(
     # Get bus connection
     bus_name = get_pypsa_property(pypsa_system, component, "bus")
     if not bus_name:
+        breakpoint()
         logger.warning(f"Load {component.name} has no bus connection")
         return
 
@@ -517,11 +518,9 @@ def _(
     # Create areas for the buses
     from_area = Area(
         name=f"{bus0_name}_area",
-        uuid=f"{bus0_name}_area_uuid"
     )
     to_area = Area(
         name=f"{bus1_name}_area", 
-        uuid=f"{bus1_name}_area_uuid"
     )
 
     # Check if areas already exist

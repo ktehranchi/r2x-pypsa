@@ -32,15 +32,16 @@ def create_operational_cost(
         The operational cost model or None if no cost data available
     """
     try:
-        # Extract cost data from PyPSA component
+        # Extract common cost data from PyPSA component
         marginal_cost = get_pypsa_property(system, pypsa_component, "marginal_cost")
         marginal_cost_quadratic = get_pypsa_property(system, pypsa_component, "marginal_cost_quadratic")
-        start_up_cost = get_pypsa_property(system, pypsa_component, "start_up_cost")
-        shut_down_cost = get_pypsa_property(system, pypsa_component, "shut_down_cost")
-        stand_by_cost = get_pypsa_property(system, pypsa_component, "stand_by_cost")
 
         # Handle different cost structures based on component type
         if isinstance(psy_component, ThermalStandard):
+            # Only extract thermal-specific costs for thermal components
+            start_up_cost = get_pypsa_property(system, pypsa_component, "start_up_cost")
+            shut_down_cost = get_pypsa_property(system, pypsa_component, "shut_down_cost")
+            stand_by_cost = get_pypsa_property(system, pypsa_component, "stand_by_cost")
             return _create_thermal_operational_cost(
                 marginal_cost, marginal_cost_quadratic, start_up_cost, 
                 shut_down_cost, stand_by_cost
