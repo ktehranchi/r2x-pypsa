@@ -13,6 +13,7 @@ from r2x.models import (
     HydroPumpedStorage,
 )
 from r2x.enums import PrimeMoversType, ThermalFuels
+from infrasys import TimeSeriesStorageType
 
 from r2x_pypsa.serialization.pypsa_to_psy import pypsa_component_to_psy
 from r2x_pypsa.serialization.to_sienna import infrasys_to_psy
@@ -40,7 +41,11 @@ def pypsa_to_sienna(
     logger.info("Converting PyPSA system to Sienna format")
     
     # Create a new PSY system
-    psy_system = System()
+    psy_system = System(
+        name="PSY system",
+        auto_add_composed_components=True,
+        time_series_storage_type=TimeSeriesStorageType.HDF5
+    )
     
     # Convert all PyPSA components to PSY components
     for component in pypsa_system._component_mgr.iter_all():
