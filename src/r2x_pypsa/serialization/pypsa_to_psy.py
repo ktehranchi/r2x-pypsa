@@ -29,6 +29,7 @@ from r2x_pypsa.models.generator import PypsaGenerator
 from r2x_pypsa.models.line import PypsaLine
 from r2x_pypsa.models.load import PypsaLoad
 from r2x_pypsa.models.storage_unit import PypsaStorageUnit
+from r2x_pypsa.models.store import PypsaStore
 from r2x_pypsa.models.link import PypsaLink
 from r2x_pypsa.serialization.cost_models import create_operational_cost
 from r2x_pypsa.serialization.utils import (
@@ -410,6 +411,77 @@ def _(
             elif property_name == "p_min_pu":
                 ts.name = "min_active_power"
             psy_system.add_time_series(ts, battery)
+
+
+@pypsa_component_to_psy.register
+def _(
+    component: PypsaStore,
+    pypsa_system: System,
+    psy_system: System,
+    mapping: dict[str, Any] | None = None,
+):
+    """Convert a PypsaStore to an EnergyReservoirStorage."""
+    # Get bus connection
+    bus_name = component.bus  # bus is a string attribute, not a PypsaProperty
+    if not bus_name:
+        logger.warning(f"Store {component.name} has no bus connection")
+        return
+
+    # Find the bus in the PSY system
+    psy_bus = psy_system.get_component(ACBus, bus_name)
+    if not psy_bus:
+        logger.warning(f"Could not find bus {bus_name} for store {component.name}")
+        return
+
+    # Get store parameters
+    e_nom = get_pypsa_property(pypsa_system, component, "e_nom") or 0.0
+    marginal_cost = get_pypsa_property(pypsa_system, component, "marginal_cost") or 0.0
+    standing_loss = get_pypsa_property(pypsa_system, component, "standing_loss") or 0.0
+    carrier = get_pypsa_property(pypsa_system, component, "carrier")
+    
+    if e_nom <= 0:
+        logger.warning(f"Store {component.name} has invalid energy capacity")
+        return
+
+    # Create the energy reservoir storage
+    # For stores, we assume 1-hour charge/discharge rate
+    p_nom = e_nom  # Assume 1-hour discharge rate
+    efficiency = 1.0 - standing_loss  # Convert standing loss to efficiency
+    
+    store = EnergyReservoirStorage(
+        uuid=component.uuid,
+        name=component.name,
+        bus=psy_bus,
+        base_power=max(p_nom, 0.001),
+        initial_storage_capacity_level=0.5,  # Default to 50% initial charge
+        efficiency=InputOutput(input=efficiency, output=efficiency),
+        input_active_power_limits=MinMax(min=0, max=p_nom),
+        output_active_power_limits=MinMax(min=0, max=p_nom),
+        discharge_efficiency=efficiency,
+        storage_technology_type=StorageTechs.LIB,  # Default to lithium-ion battery
+        prime_mover_type=PrimeMoversType.BA,
+        storage_capacity=e_nom,
+    )
+    store.services = []
+    psy_system.add_component(store)
+
+    # Set operation cost (temporarily disabled for testing)
+    # if marginal_cost > 0:
+    #     from r2x_pypsa.serialization.api import create_default_mapping
+    #     if mapping is None:
+    #         mapping = create_default_mapping()
+    #     
+    #     store.operation_cost = create_operational_cost(store, component, pypsa_system)
+
+    # Add time series if they exist
+    for property_name in ["e_set", "marginal_cost"]:
+        if pypsa_system.has_time_series(component, property_name):
+            ts = pypsa_system.get_time_series(component, property_name)
+            if property_name == "e_set":
+                ts.name = "energy_capacity"
+            elif property_name == "marginal_cost":
+                ts.name = "operation_cost"
+            psy_system.add_time_series(ts, store)
 
 
 @pypsa_component_to_psy.register
