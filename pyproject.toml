@@ -1,22 +1,67 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "r2x-pypsa"
 version = "0.1.0"
 description = "PyPSA to R2X parser and converter"
 readme = "README.md"
+license = {file = "LICENSE"}
+authors = [
+    {name = "Kamran Tehranchi", email = "ktehranchi@stanford.edu"}
+    {name = "Henry Daniels-Koch", email = "hdaniels@stanford.edu"}
+]
+maintainers = [
+    {name = "Kamran Tehranchi", email = "ktehranchi@stanford.edu"}
+    {name = "Henry Daniels-Koch", email = "hdaniels@stanford.edu"}
+]
+keywords = ["pypsa", "r2x", "sienna", "power-systems", "converter", "parser"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
     "r2x>=1.1.0",
     "pypsa==0.35.2",
     "pandas",
     "loguru",
     "ipython>=9.6.0",
-    "pytest>=8.4.2",
-    "r2x-pypsa",
 ]
 requires-python = ">=3.11"
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.4.2",
+    "pytest-cov",
+    "black",
+    "flake8",
+    "mypy",
+]
+test = [
+    "pytest>=8.4.2",
+    "pytest-cov",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourusername/r2x-pypsa"
+Repository = "https://github.com/yourusername/r2x-pypsa"
+Documentation = "https://github.com/yourusername/r2x-pypsa#readme"
+"Bug Tracker" = "https://github.com/yourusername/r2x-pypsa/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/r2x_pypsa"]
+
 [tool.uv.sources]
 r2x = { git = "https://github.com/NREL/r2x", branch = "v2.0.0" }
-r2x-pypsa = { path = ".", editable = true } 
 
 [tool.pytest.ini_options]
 pythonpath = [
