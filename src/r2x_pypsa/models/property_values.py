@@ -200,15 +200,9 @@ class PypsaProperty(BaseModel):
         PypsaProperty
             A new property with the specified time series
         """
-        mean_value = round(series.mean(), 5)
-        
-        # For fields that should be non-negative, ensure the mean is at least 0
-        # This handles cases where the time series has negative values but the field constraint is ge=0
-        if mean_value < 0:
-            mean_value = 0.0
         
         return cls.create(
-            value=mean_value,
+            value=series.mean(),
             units=units,
             time_series=series,
             **kwargs
