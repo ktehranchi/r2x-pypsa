@@ -5,3 +5,5 @@ __pycache__
 *.pyc
 *.log
 *.DS_STORE
+test_output.json
+time_series_storage.h5
