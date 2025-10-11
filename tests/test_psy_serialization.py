@@ -83,8 +83,8 @@ def test_psy_serialization_store() -> None:
 
 
 def test_psy_serialization_from_netcdf() -> None:
-    """Test PyPSA to PSY conversion using the test_simple_network.nc file."""
-    test_file = Path(__file__).parent / "data" / "test_simple_network.nc"
+    """Test PyPSA to PSY conversion using the test_network.nc file."""
+    test_file = Path(__file__).parent / "data" / "test_network.nc"
     if not test_file.exists():
         pytest.skip(f"Test network file not found: {test_file}")
     

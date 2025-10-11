@@ -10,7 +10,6 @@ dependencies = [
     "loguru",
     "ipython>=9.6.0",
     "pytest>=8.4.2",
-    "r2x-pypsa",
 ]
 requires-python = ">=3.11"
 

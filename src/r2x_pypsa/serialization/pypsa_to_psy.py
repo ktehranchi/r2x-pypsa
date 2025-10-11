@@ -193,16 +193,19 @@ def _(
     if isinstance(generator, ThermalStandard) and carrier in fuel_mapping:
         generator.fuel = fuel_mapping[carrier]
 
-    # Set operation cost (temporarily disabled for testing)
-    # if isinstance(generator, (ThermalStandard, HydroDispatch, RenewableDispatch)):
-    #     generator.operation_cost = create_operational_cost(
-    #         generator, component, pypsa_system
-    #     )
+    # Set operation cost
+    if isinstance(generator, (ThermalStandard, HydroDispatch, RenewableDispatch)):
+        generator.operation_cost = create_operational_cost(
+            generator, component, pypsa_system
+        )
 
     # Set capacity and limits
     p_nom = get_pypsa_property(pypsa_system, component, "p_nom")
-    if p_nom is None or p_nom <= 0:
+    if p_nom is None or p_nom < 0:
         logger.warning(f"Generator {component.name} has invalid capacity")
+        return
+    elif p_nom == 0:
+        logger.info(f"Generator {component.name} has zero capacity, indicating future build.")
         return
 
     # Get power limits
@@ -277,7 +280,7 @@ def _(
     s_nom = get_pypsa_property(pypsa_system, component, "s_nom")
     s_max_pu = get_pypsa_property(pypsa_system, component, "s_max_pu") or 1.0
     
-    if s_nom is None or s_nom <= 0:
+    if s_nom is None or s_nom < 0:
         logger.warning(f"Line {component.name} has invalid capacity")
         return
 
@@ -312,7 +315,6 @@ def _(
     # Get bus connection
     bus_name = get_pypsa_property(pypsa_system, component, "bus")
     if not bus_name:
-        breakpoint()
         logger.warning(f"Load {component.name} has no bus connection")
         return
 
@@ -324,15 +326,12 @@ def _(
 
     # Get load value
     p_set = get_pypsa_property(pypsa_system, component, "p_set") or 0.0
-    q_set = get_pypsa_property(pypsa_system, component, "q_set") or 0.0
 
     load = PowerLoad(
         name=component.name,
         bus=bus,
         base_power=abs(p_set) if p_set != 0 else 100.0,
         active_power=p_set,
-        reactive_power=q_set,
-        max_reactive_power=abs(q_set) if q_set != 0 else 0.0,
         max_active_power=abs(p_set) if p_set != 0 else 0.0,
     )
     load.services = []
@@ -372,7 +371,7 @@ def _(
     efficiency_dispatch = get_pypsa_property(pypsa_system, component, "efficiency_dispatch") or 1.0
     state_of_charge_initial = get_pypsa_property(pypsa_system, component, "state_of_charge_initial") or 0.0
 
-    if p_nom is None or p_nom <= 0:
+    if p_nom is None or p_nom < 0:
         logger.warning(f"Storage {component.name} has invalid power capacity")
         return
 
@@ -440,7 +439,7 @@ def _(
     standing_loss = get_pypsa_property(pypsa_system, component, "standing_loss") or 0.0
     carrier = get_pypsa_property(pypsa_system, component, "carrier")
     
-    if e_nom <= 0:
+    if e_nom is None or e_nom < 0:
         logger.warning(f"Store {component.name} has invalid energy capacity")
         return
 
@@ -538,7 +537,7 @@ def _(
     p_nom = get_pypsa_property(pypsa_system, component, "p_nom") or 0.0
     efficiency = get_pypsa_property(pypsa_system, component, "efficiency") or 1.0
     
-    if p_nom <= 0:
+    if p_nom < 0:
         logger.warning(f"Link {component.name} has invalid capacity")
         return
 
