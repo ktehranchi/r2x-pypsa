@@ -1,8 +1,8 @@
 """PyPSA Generator model for r2x-pypsa."""
 
 from infrasys.component import Component
-from typing import Annotated
-from pydantic import Field
+from typing import Annotated, Any
+from pydantic import Field, field_validator, model_validator
 
 from r2x_pypsa.models.property_values import PypsaProperty, PropertyType
 from r2x_pypsa.models.units import Units
@@ -274,13 +274,6 @@ class PypsaGenerator(Component):
         ),
     ] = PypsaProperty.create(value=0.0, units="MW")
     
-    q_set: Annotated[
-        PropertyType,
-        Field(
-            alias="Reactive Power Set Point",
-            description="Reactive power set point (for power flow)",
-        ),
-    ] = PypsaProperty.create(value=0.0, units="MVar")
     
     marginal_cost: Annotated[
         PropertyType,

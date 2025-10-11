@@ -58,10 +58,3 @@ class PypsaLoad(Component):
         ),
     ] = PypsaProperty.create(value=0.0, units="MW")
     
-    q_set: Annotated[
-        PropertyType,
-        Field(
-            alias="Reactive Power Set Point",
-            description="Reactive power consumption (positive if the load is inductive).",
-        ),
-    ] = PypsaProperty.create(value=0.0, units="MVar")
