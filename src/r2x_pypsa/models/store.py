@@ -186,13 +186,6 @@ class PypsaStore(Component):
         ),
     ] = PypsaProperty.create(value=float('nan'), units="MW")
     
-    q_set: Annotated[
-        PropertyType,
-        Field(
-            alias="Reactive Power Set Point",
-            description="Reactive power set point (for power flow only)",
-        ),
-    ] = PypsaProperty.create(value=0.0, units="MVar")
     
     e_set: Annotated[
         PropertyType,

@@ -200,8 +200,9 @@ class PypsaProperty(BaseModel):
         PypsaProperty
             A new property with the specified time series
         """
+        
         return cls.create(
-            value=series.mean() if not series.empty else None,
+            value=series.mean(),
             units=units,
             time_series=series,
             **kwargs

@@ -122,7 +122,6 @@ class PypsaParser(BaseParser):
         p_min_pu_t = self.network.get_switchable_as_dense('Generator', 'p_min_pu')
         p_max_pu_t = self.network.get_switchable_as_dense('Generator', 'p_max_pu')
         p_set_t = self.network.get_switchable_as_dense('Generator', 'p_set')
-        q_set_t = self.network.get_switchable_as_dense('Generator', 'q_set')
         marginal_cost_t = self.network.get_switchable_as_dense('Generator', 'marginal_cost')
         marginal_cost_quadratic_t = self.network.get_switchable_as_dense('Generator', 'marginal_cost_quadratic')
         efficiency_t = self.network.get_switchable_as_dense('Generator', 'efficiency')
@@ -136,6 +135,7 @@ class PypsaParser(BaseParser):
         
         for gen_name, gen_data in self.network.generators.iterrows():
             try:
+                     
                 # Create PyPSA generator component with all attributes
                 generator = PypsaGenerator(
                     # Required attributes
@@ -175,7 +175,6 @@ class PypsaParser(BaseParser):
                     p_min_pu=get_ts_or_static(self.network, 'generators_t', 'p_min_pu', gen_name, p_min_pu_t, gen_data, 0.0),
                     p_max_pu=get_ts_or_static(self.network, 'generators_t', 'p_max_pu', gen_name, p_max_pu_t, gen_data, 1.0),
                     p_set=get_ts_or_static(self.network, 'generators_t', 'p_set', gen_name, p_set_t, gen_data, 0.0),
-                    q_set=get_ts_or_static(self.network, 'generators_t', 'q_set', gen_name, q_set_t, gen_data, 0.0),
                     marginal_cost=get_ts_or_static(self.network, 'generators_t', 'marginal_cost', gen_name, marginal_cost_t, gen_data, 0.0),
                     marginal_cost_quadratic=get_ts_or_static(self.network, 'generators_t', 'marginal_cost_quadratic', gen_name, marginal_cost_quadratic_t, gen_data, 0.0),
                     efficiency=get_ts_or_static(self.network, 'generators_t', 'efficiency', gen_name, efficiency_t, gen_data, 1.0),
@@ -185,7 +184,7 @@ class PypsaParser(BaseParser):
                     
                     
                 )
-                
+
                 # Add generator to system
                 system.add_component(generator)
                 logger.debug(f"Added generator {gen_name} with carrier {gen_data.get('carrier', 'unknown')}")
@@ -209,7 +208,6 @@ class PypsaParser(BaseParser):
         # Normal attributes (always exist)
         p_min_pu_t = self.network.get_switchable_as_dense('StorageUnit', 'p_min_pu')
         p_max_pu_t = self.network.get_switchable_as_dense('StorageUnit', 'p_max_pu')
-        q_set_t = self.network.get_switchable_as_dense('StorageUnit', 'q_set')
         spill_cost_t = self.network.get_switchable_as_dense('StorageUnit', 'spill_cost')
         marginal_cost_t = self.network.get_switchable_as_dense('StorageUnit', 'marginal_cost')
         marginal_cost_quadratic_t = self.network.get_switchable_as_dense('StorageUnit', 'marginal_cost_quadratic')
@@ -257,7 +255,6 @@ class PypsaParser(BaseParser):
                     p_min_pu=get_ts_or_static(self.network, 'storage_units_t', 'p_min_pu', storage_name, p_min_pu_t, storage_data, -1.0),
                     p_max_pu=get_ts_or_static(self.network, 'storage_units_t', 'p_max_pu', storage_name, p_max_pu_t, storage_data, 1.0),
                     p_set=get_ts_or_static(self.network, 'storage_units_t', 'p_set', storage_name, p_set_t, storage_data, float('nan')),
-                    q_set=get_ts_or_static(self.network, 'storage_units_t', 'q_set', storage_name, q_set_t, storage_data, 0.0),
                     p_dispatch_set=get_ts_or_static(self.network, 'storage_units_t', 'p_dispatch_set', storage_name, p_dispatch_set_t, storage_data, float('nan')),
                     p_store_set=get_ts_or_static(self.network, 'storage_units_t', 'p_store_set', storage_name, p_store_set_t, storage_data, float('nan')),
                     spill_cost=get_ts_or_static(self.network, 'storage_units_t', 'spill_cost', storage_name, spill_cost_t, storage_data, 0.0),
@@ -421,7 +418,6 @@ class PypsaParser(BaseParser):
         
         # Get time-varying data using get_switchable_as_dense
         p_set_t = self.network.get_switchable_as_dense('Load', 'p_set')
-        q_set_t = self.network.get_switchable_as_dense('Load', 'q_set')
         
         for load_name, load_data in self.network.loads.iterrows():
             try:
@@ -439,7 +435,6 @@ class PypsaParser(BaseParser):
                     
                     # Time-varying attributes
                     p_set=get_ts_or_static(self.network, 'loads_t', 'p_set', load_name, p_set_t, load_data, 0.0),
-                    q_set=get_ts_or_static(self.network, 'loads_t', 'q_set', load_name, q_set_t, load_data, 0.0),
                 )
                 
                 # Add load to system
@@ -464,7 +459,6 @@ class PypsaParser(BaseParser):
         # Normal attributes (always exist)
         e_min_pu_t = self.network.get_switchable_as_dense('Store', 'e_min_pu')
         e_max_pu_t = self.network.get_switchable_as_dense('Store', 'e_max_pu')
-        q_set_t = self.network.get_switchable_as_dense('Store', 'q_set')
         marginal_cost_t = self.network.get_switchable_as_dense('Store', 'marginal_cost')
         marginal_cost_quadratic_t = self.network.get_switchable_as_dense('Store', 'marginal_cost_quadratic')
         marginal_cost_storage_t = self.network.get_switchable_as_dense('Store', 'marginal_cost_storage')
@@ -504,7 +498,6 @@ class PypsaParser(BaseParser):
                     e_min_pu=get_ts_or_static(self.network, 'stores_t', 'e_min_pu', store_name, e_min_pu_t, store_data, 0.0),
                     e_max_pu=get_ts_or_static(self.network, 'stores_t', 'e_max_pu', store_name, e_max_pu_t, store_data, 1.0),
                     p_set=get_ts_or_static(self.network, 'stores_t', 'p_set', store_name, p_set_t, store_data, float('nan')),
-                    q_set=get_ts_or_static(self.network, 'stores_t', 'q_set', store_name, q_set_t, store_data, 0.0),
                     e_set=get_ts_or_static(self.network, 'stores_t', 'e_set', store_name, e_set_t, store_data, float('nan')),
                     marginal_cost=get_ts_or_static(self.network, 'stores_t', 'marginal_cost', store_name, marginal_cost_t, store_data, 0.0),
                     marginal_cost_quadratic=get_ts_or_static(self.network, 'stores_t', 'marginal_cost_quadratic', store_name, marginal_cost_quadratic_t, store_data, 0.0),

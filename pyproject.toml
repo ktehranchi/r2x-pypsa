@@ -15,6 +15,7 @@ requires-python = ">=3.11"
 
 [tool.uv.sources]
 r2x = { git = "https://github.com/NREL/r2x", branch = "v2.0.0" }
+r2x-pypsa = { path = ".", editable = true } 
 
 [tool.pytest.ini_options]
 pythonpath = [
