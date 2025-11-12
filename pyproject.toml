@@ -10,12 +10,13 @@ dependencies = [
     "loguru",
     "ipython>=9.6.0",
     "pytest>=8.4.2",
+    "gurobipy>=12.0.3",
 ]
 requires-python = ">=3.11"
 
 [tool.uv.sources]
 r2x = { git = "https://github.com/NREL/r2x", branch = "v2.0.0" }
-r2x-pypsa = { path = ".", editable = true } 
+r2x-pypsa = { path = ".", editable = true }
 
 [tool.pytest.ini_options]
 pythonpath = [

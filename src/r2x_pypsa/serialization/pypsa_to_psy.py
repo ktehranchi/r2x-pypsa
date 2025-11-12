@@ -43,6 +43,118 @@ from r2x_pypsa.serialization.utils import (
 )
 
 
+# Global counter for assigning unique object IDs to PyPSA components
+_object_id_counter = {}
+
+
+def create_single_time_series_from_pandas(ts_data, name: str):
+    """Create a SingleTimeSeries from a pandas Series.
+    
+    Simplified approach similar to r2x-plexos - extract datetime info from index
+    and use pandas' built-in methods.
+    
+    Parameters
+    ----------
+    ts_data : pd.Series
+        Pandas Series with DatetimeIndex (or MultiIndex with datetime level)
+    name : str
+        Name for the time series
+        
+    Returns
+    -------
+    SingleTimeSeries
+        A SingleTimeSeries object with proper initial_timestamp and resolution
+    """
+    from infrasys import SingleTimeSeries
+    from datetime import timedelta, datetime
+    import pandas as pd
+    
+    # Get the index - handle MultiIndex by extracting datetime level
+    if isinstance(ts_data.index, pd.MultiIndex):
+        # Find datetime level in MultiIndex
+        for level_idx in range(ts_data.index.nlevels):
+            level_values = ts_data.index.get_level_values(level_idx)
+            if len(level_values) > 0 and pd.api.types.is_datetime64_any_dtype(level_values):
+                index = level_values
+                break
+        else:
+            # No datetime level found, use first level and try to convert
+            index = ts_data.index.get_level_values(0)
+            index = pd.to_datetime(index)
+    else:
+        index = ts_data.index
+    
+    # Extract initial_timestamp - pandas handles conversion
+    if len(index) > 0:
+        initial_timestamp = pd.to_datetime(index[0])
+    else:
+        initial_timestamp = datetime(2020, 1, 1)
+    
+    # Calculate resolution from index frequency or first two timestamps
+    if len(index) > 1:
+        # Try to infer frequency from index
+        if hasattr(index, 'freq') and index.freq is not None:
+            resolution = index.freq.delta
+        else:
+            # Calculate from first two timestamps
+            resolution = pd.to_datetime(index[1]) - pd.to_datetime(index[0])
+    else:
+        # Default to 1 hour if only one timestamp
+        resolution = timedelta(hours=1)
+    
+    # Convert pandas Timestamp to datetime if needed
+    if isinstance(initial_timestamp, pd.Timestamp):
+        initial_timestamp = initial_timestamp.to_pydatetime()
+    
+    # Convert timedelta if it's a pandas Timedelta
+    if isinstance(resolution, pd.Timedelta):
+        resolution = resolution.to_pytimedelta()
+    
+    # Normalize resolution to hours to ensure consistency
+    # This prevents mixing Hour(1) and Millisecond(3600000) which causes errors
+    if isinstance(resolution, timedelta):
+        # Convert to total hours (as float) then back to timedelta to normalize
+        total_hours = resolution.total_seconds() / 3600.0
+        # Round to nearest hour to avoid floating point issues
+        resolution = timedelta(hours=round(total_hours))
+    
+    return SingleTimeSeries.from_array(
+        data=ts_data.values.tolist(),
+        name=name,
+        initial_timestamp=initial_timestamp,
+        resolution=resolution,
+    )
+
+
+def get_or_assign_object_id(component: PypsaDevice, component_type: type) -> int:
+    """Get existing object_id or assign a new unique one.
+    
+    Parameters
+    ----------
+    component : PypsaDevice
+        The PyPSA component
+    component_type : type
+        The type of component (e.g., ACBus, ThermalStandard)
+        
+    Returns
+    -------
+    int
+        A unique object ID
+    """
+    # Try to get existing object_id from component
+    existing_id = get_pypsa_object_id(component)
+    if existing_id:
+        return existing_id
+    
+    # Generate new ID based on component type counter
+    type_name = component_type.__name__
+    if type_name not in _object_id_counter:
+        _object_id_counter[type_name] = 0
+    
+    _object_id_counter[type_name] += 1
+    return _object_id_counter[type_name]
+
+
 @singledispatch
 def pypsa_component_to_psy(
     component: PypsaDevice,
@@ -106,9 +218,8 @@ def _(
         logger.trace("Component {} already processed. Skipping it.", component.name)
         return
 
-    object_id = get_pypsa_object_id(component)
-    if not object_id:
-        object_id = 1  # Default object ID
+    # Get or assign unique object_id
+    object_id = get_or_assign_object_id(component, ACBus)
 
     # Extract voltage information
     v_nom = get_pypsa_property(pypsa_system, component, "v_nom")
@@ -121,6 +232,10 @@ def _(
     base_voltage = create_voltage_from_pypsa(v_nom, v_nom_units)
 
     # Determine bus type based on PyPSA bus type or default to PV
+    # PowerSystems requires at least one REF (slack) bus
+    existing_buses = list(psy_system.get_components(ACBus))
+    has_ref_bus = any(bus.bustype == ACBusTypes.REF for bus in existing_buses)
+    
     bustype = ACBusTypes.PV
     if hasattr(component, 'type') and component.type.get_value():
         bus_type_value = component.type.get_value()
@@ -130,6 +245,11 @@ def _(
             bustype = ACBusTypes.PV
         elif bus_type_value == "PQ":
             bustype = ACBusTypes.PQ
+    
+    # If no REF bus exists yet, make the first bus REF
+    if not has_ref_bus and len(existing_buses) == 0:
+        bustype = ACBusTypes.REF
+        logger.info(f"Setting first bus {component.name} as REF (slack) bus")
 
     bus = ACBus(
         name=component.name,
@@ -220,11 +340,23 @@ def _(
     generator.services = []
     psy_system.add_component(generator)
 
-    # Handle time series
-    if pypsa_system.has_time_series(component, "p_max_pu"):
-        ts = pypsa_system.get_time_series(component, "p_max_pu")
-        ts.name = "max_active_power"
-        psy_system.add_time_series(ts, generator)
+    # Handle time series - extract from PypsaProperty if it exists
+    # For renewable generators, p_max_pu is the capacity factor time series (per-unit 0-1)
+    # Convert to MW by multiplying by p_nom (like r2x-plexos converts rating_factor to MW)
+    if hasattr(component, "p_max_pu"):
+        if hasattr(component.p_max_pu, "has_time_series") and component.p_max_pu.has_time_series():
+            ts_data = component.p_max_pu.get_time_series()
+            # Convert capacity factor (per-unit) to MW
+            if hasattr(ts_data, 'values'):
+                ts_data_mw = ts_data * p_nom
+            else:
+                import pandas as pd
+                ts_data_mw = pd.Series(ts_data.values * p_nom, index=ts_data.index)
+            ts = create_single_time_series_from_pandas(ts_data_mw, "max_active_power")
+            psy_system.add_time_series(ts, generator)
+            logger.info(f"Added time series for generator {component.name} (length: {len(ts_data)}, converted to MW)")
+        else:
+            logger.debug(f"Generator {component.name} p_max_pu has no time series")
 
 
 @pypsa_component_to_psy.register
@@ -295,11 +427,12 @@ def _(
     )
     interchange.services = []
 
-    # Add time series if they exist
-    if pypsa_system.has_time_series(component, "s_max_pu"):
-        ts = pypsa_system.get_time_series(component, "s_max_pu")
-        ts.name = "max_active_power"
+    # Add time series if they exist - extract from PypsaProperty
+    if hasattr(component, "s_max_pu") and component.s_max_pu.has_time_series():
+        ts_data = component.s_max_pu.get_time_series()
+        ts = create_single_time_series_from_pandas(ts_data, "max_active_power")
         psy_system.add_time_series(ts, interchange)
+        logger.debug(f"Added time series for line {component.name}")
 
     psy_system.add_component(interchange)
 
@@ -324,24 +457,70 @@ def _(
         logger.warning(f"Could not find bus {bus_name} for load {component.name}")
         return
 
-    # Get load value
+    # Get load value (in MW)
     p_set = get_pypsa_property(pypsa_system, component, "p_set") or 0.0
+    
+    # Use fixed base_power like r2x-plexos (100.0 MW)
+    base_power = 100.0  # Fixed base power in MW
+    
+    # Check if there's a time series to determine max load value
+    # Time series will be converted to per-unit later, so we need max in MW for static field
+    has_ts = False
+    max_load_value_mw = abs(p_set) if isinstance(p_set, (int, float)) else 0.0
+    
+    if hasattr(component, "p_set"):
+        try:
+            if hasattr(component.p_set, "has_time_series") and component.p_set.has_time_series():
+                has_ts = True
+                ts_data = component.p_set.get_time_series()
+                # Get max value from time series (in MW)
+                if hasattr(ts_data, 'max'):
+                    max_load_value_mw = max(abs(ts_data.max()), abs(ts_data.min()), abs(p_set) if isinstance(p_set, (int, float)) else 0.0)
+                elif hasattr(ts_data, 'values'):
+                    max_load_value_mw = max(abs(ts_data.values.max()), abs(ts_data.values.min()), abs(p_set) if isinstance(p_set, (int, float)) else 0.0)
+        except Exception as e:
+            logger.warning(f"Could not check time series for load {component.name}: {e}")
+    
+    # IMPORTANT: max_active_power static field should be stored in per-unit (relative to base_power)
+    # When get_value() is called with NATURAL_UNITS, it multiplies by base_power to convert to MW
+    # Documentation: "max_active_power = 1.0, # 10 MW per-unitized by device base_power"
+    max_active_power_pu = max_load_value_mw / base_power if max_load_value_mw > 0 else 0.0  # Per-unit
+    active_power_pu = (p_set / base_power) if isinstance(p_set, (int, float)) and p_set != 0 else 0.0
 
     load = PowerLoad(
         name=component.name,
         bus=bus,
-        base_power=abs(p_set) if p_set != 0 else 100.0,
-        active_power=p_set,
-        max_active_power=abs(p_set) if p_set != 0 else 0.0,
+        base_power=base_power,  # Fixed 100.0 MW base
+        active_power=active_power_pu,  # Per-unit
+        reactive_power=1e-6,  # PowerSystems v5 requires > 0, use small positive value
+        max_active_power=max_active_power_pu,  # Per-unit - get_value() multiplies by base_power to get MW
+        max_reactive_power=1e-6,  # PowerSystems v5 requires > 0, use small positive value
     )
     load.services = []
     psy_system.add_component(load)
 
-    # Handle time series
-    if pypsa_system.has_time_series(component, "p_set"):
-        ts = pypsa_system.get_time_series(component, "p_set")
-        ts.name = "max_active_power"
-        psy_system.add_time_series(ts, load)
+    # Handle time series - extract from PypsaProperty if it exists
+    # Use "active_power" instead of "max_active_power" to avoid PowerSystems v5 bug where
+    # get_max_active_power() returns MW instead of per-unit when a time series named "max_active_power" exists.
+    # PowerSimulations StaticPowerLoad will still use this time series for constraints.
+    if hasattr(component, "p_set"):
+        try:
+            if hasattr(component.p_set, "has_time_series") and component.p_set.has_time_series():
+                ts_data = component.p_set.get_time_series()
+                # Convert to per-unit (divide by base_power)
+                # Store as "active_power" (not "max_active_power") to avoid PowerSystems v5 bug
+                if hasattr(ts_data, 'values'):
+                    ts_data_pu = ts_data / base_power
+                else:
+                    import pandas as pd
+                    ts_data_pu = pd.Series(ts_data.values / base_power, index=ts_data.index)
+                ts = create_single_time_series_from_pandas(ts_data_pu, "active_power")
+                psy_system.add_time_series(ts, load)
+                logger.info(f"Added time series for load {component.name} (length: {len(ts_data)}, as 'active_power' in per-unit)")
+            else:
+                logger.debug(f"Load {component.name} p_set has no time series")
+        except Exception as e:
+            logger.warning(f"Could not extract time series from load {component.name}: {e}")
 
 
 @pypsa_component_to_psy.register
@@ -402,15 +581,22 @@ def _(
     battery.services = []
     psy_system.add_component(battery)
 
-    # Handle time series
+    # Handle time series - extract from PypsaProperty
     for property_name in ["p_max_pu", "p_min_pu", "inflow"]:
-        if pypsa_system.has_time_series(component, property_name):
-            ts = pypsa_system.get_time_series(component, property_name)
-            if property_name == "p_max_pu":
-                ts.name = "max_active_power"
-            elif property_name == "p_min_pu":
-                ts.name = "min_active_power"
-            psy_system.add_time_series(ts, battery)
+        if hasattr(component, property_name):
+            prop = getattr(component, property_name)
+            if hasattr(prop, "has_time_series") and prop.has_time_series():
+                ts_data = prop.get_time_series()
+                if property_name == "p_max_pu":
+                    ts = create_single_time_series_from_pandas(ts_data, "max_active_power")
+                elif property_name == "p_min_pu":
+                    ts = create_single_time_series_from_pandas(ts_data, "min_active_power")
+                elif property_name == "inflow":
+                    ts = create_single_time_series_from_pandas(ts_data, "inflow")
+                else:
+                    continue
+                psy_system.add_time_series(ts, battery)
+                logger.debug(f"Added {property_name} time series for storage {component.name}")
 
 
 @pypsa_component_to_psy.register
@@ -473,15 +659,20 @@ def _(
     #     
     #     store.operation_cost = create_operational_cost(store, component, pypsa_system)
 
-    # Add time series if they exist
+    # Add time series if they exist - extract from PypsaProperty
     for property_name in ["e_set", "marginal_cost"]:
-        if pypsa_system.has_time_series(component, property_name):
-            ts = pypsa_system.get_time_series(component, property_name)
-            if property_name == "e_set":
-                ts.name = "energy_capacity"
-            elif property_name == "marginal_cost":
-                ts.name = "operation_cost"
-            psy_system.add_time_series(ts, store)
+        if hasattr(component, property_name):
+            prop = getattr(component, property_name)
+            if hasattr(prop, "has_time_series") and prop.has_time_series():
+                ts_data = prop.get_time_series()
+                if property_name == "e_set":
+                    ts = create_single_time_series_from_pandas(ts_data, "energy_capacity")
+                elif property_name == "marginal_cost":
+                    ts = create_single_time_series_from_pandas(ts_data, "operation_cost")
+                else:
+                    continue
+                psy_system.add_time_series(ts, store)
+                logger.debug(f"Added {property_name} time series for store {component.name}")
 
 
 @pypsa_component_to_psy.register
@@ -563,14 +754,19 @@ def _(
     reverse_interchange.services = []
     psy_system.add_component(reverse_interchange)
 
-    # Add time series if they exist
+    # Add time series if they exist - extract from PypsaProperty
     for property_name in ["p_set", "marginal_cost"]:
-        if pypsa_system.has_time_series(component, property_name):
-            ts = pypsa_system.get_time_series(component, property_name)
-            if property_name == "p_set":
-                ts.name = "active_power"
-            elif property_name == "marginal_cost":
-                ts.name = "operation_cost"
-            # Add time series to both forward and reverse interchanges
-            psy_system.add_time_series(ts, forward_interchange)
-            psy_system.add_time_series(ts, reverse_interchange)
+        if hasattr(component, property_name):
+            prop = getattr(component, property_name)
+            if hasattr(prop, "has_time_series") and prop.has_time_series():
+                ts_data = prop.get_time_series()
+                if property_name == "p_set":
+                    ts = create_single_time_series_from_pandas(ts_data, "active_power")
+                elif property_name == "marginal_cost":
+                    ts = create_single_time_series_from_pandas(ts_data, "operation_cost")
+                else:
+                    continue
+                # Add time series to both forward and reverse interchanges
+                psy_system.add_time_series(ts, forward_interchange)
+                psy_system.add_time_series(ts, reverse_interchange)
+                logger.debug(f"Added {property_name} time series for link {component.name}")

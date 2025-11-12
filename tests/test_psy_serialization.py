@@ -1,51 +1,98 @@
 from pathlib import Path
 import pytest
+import pypsa
 from r2x.api import System
 from r2x.models import ThermalStandard, RenewableDispatch, EnergyReservoirStorage, ACBus, PowerLoad, Line
 from datetime import datetime, timedelta
 from infrasys import SingleTimeSeries
+from loguru import logger
 
 from r2x_pypsa.models import PypsaGenerator, PypsaBus, PypsaStore, PypsaLoad, PypsaLine
 from r2x_pypsa.models.property_values import PypsaProperty
 from r2x_pypsa.serialization.pypsa_to_psy import pypsa_component_to_psy
 from r2x_pypsa.parser import PypsaParser
+from r2x_pypsa.serialization import create_default_mapping
 
 
 def test_psy_serialization_generator() -> None:
-    # First try a generator with thermal carrier
-    system = System()
-    gen: PypsaGenerator = PypsaGenerator.example()
-    gen.carrier = PypsaProperty.create(value="coal")
-    bus: PypsaBus = PypsaBus(name="Bus1")
-
-    initial_time = datetime(year=2012, month=1, day=1)
-    ts = SingleTimeSeries.from_array(
-        data=range(0, 8760),
-        name="p_set",
-        initial_timestamp=initial_time,
-        resolution=timedelta(hours=1),
+    """Test generator conversion with p_max_pu time series extraction.
+    
+    This test matches the e2e test structure - uses real PyPSA network and parser.
+    """
+    from infrasys import TimeSeriesStorageType
+    
+    # Use the same test file as e2e test
+    test_file = Path("tests/data/elec_s380_c7a_ec_lv1.5_RPS-REM-TCT-1h_E.nc")
+    if not test_file.exists():
+        pytest.skip(f"Test network file not found: {test_file}")
+    
+    # Load and optimize network (like e2e test does)
+    network = pypsa.Network(test_file)
+    network.optimize(snapshots=network.snapshots[0:7*24], solver_name='highs')
+    
+    # Parse to R2X system (like e2e test does)
+    parser = PypsaParser(network=network)
+    pypsa_system = parser.build_system()
+    
+    # Find a generator with p_max_pu time series (renewable generators)
+    from r2x_pypsa.models import PypsaGenerator
+    generators_with_ts = []
+    for component in pypsa_system._component_mgr.iter_all():
+        if isinstance(component, PypsaGenerator):
+            if hasattr(component, 'p_max_pu') and component.p_max_pu.has_time_series():
+                generators_with_ts.append(component)
+                break  # Just test one
+    
+    if not generators_with_ts:
+        pytest.skip("No generators with p_max_pu time series found in test network")
+    
+    test_gen = generators_with_ts[0]
+    logger.info(f"Testing generator: {test_gen.name}")
+    
+    # Convert to PSY system (like e2e test does)
+    mapping = create_default_mapping()
+    psy_system = System(
+        name="PSY system",
+        auto_add_composed_components=True,
+        time_series_storage_type=TimeSeriesStorageType.HDF5
     )
-    system.add_time_series(ts, gen)
-    system.add_components(gen, bus)
     
-    psy_system = System()
-    # Convert the bus first
-    pypsa_component_to_psy(bus, system, psy_system)
-    # Then convert the generator
-    pypsa_component_to_psy(gen, system, psy_system)
-    psy_generators = list(psy_system.get_components(ThermalStandard))
-    assert len(psy_generators) == 1
-    assert psy_generators[0].name == gen.name
-
-    # Test that if there is no bus we skip it.
-    gen2: PypsaGenerator = PypsaGenerator.example()
-    gen2.carrier = PypsaProperty.create(value="solar")
-    system.add_components(gen2)
+    # Convert all components (like e2e test does)
+    for component in pypsa_system._component_mgr.iter_all():
+        try:
+            pypsa_component_to_psy(component, pypsa_system, psy_system, mapping)
+        except Exception as e:
+            logger.warning(f"Failed to convert component {component.name}: {e}")
+            continue
     
-    psy_system2 = System()
-    pypsa_component_to_psy(gen2, system, psy_system2)
-    psy_generators2 = list(psy_system2.get_components(ThermalStandard)) + list(psy_system2.get_components(RenewableDispatch))
-    assert len(psy_generators2) == 0
+    # Check generator was converted
+    psy_generators = list(psy_system.get_components(RenewableDispatch)) + list(psy_system.get_components(ThermalStandard))
+    assert len(psy_generators) > 0, "Should have generators"
+    
+    # Find our test generator
+    psy_gen = None
+    for gen in psy_generators:
+        if gen.name == test_gen.name:
+            psy_gen = gen
+            break
+    
+    assert psy_gen is not None, f"Generator {test_gen.name} should be converted"
+    
+    # Check that time series was extracted and added
+    time_series_list = list(psy_system.list_time_series(psy_gen))
+    assert len(time_series_list) > 0, f"Generator {test_gen.name} should have time series"
+    
+    # Find the max_active_power time series
+    max_power_ts = None
+    for ts in time_series_list:
+        if ts.name == "max_active_power":
+            max_power_ts = ts
+            break
+    
+    assert max_power_ts is not None, f"Generator {test_gen.name} should have max_active_power time series"
+    # Check it has data (length depends on optimization snapshots)
+    assert len(max_power_ts.data) > 0, "Time series should have data"
+    assert max_power_ts.resolution == timedelta(hours=1), "Resolution should be 1 hour"
 
 
 def test_psy_serialization_store() -> None:

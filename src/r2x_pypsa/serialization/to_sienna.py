@@ -420,10 +420,50 @@ def infrasys_to_psy(
     if not isinstance(filename, Path):
         filename = Path(filename)
 
-    time_series_storage_file = filename.parent / "time_series_storage.h5"
+    # Use matching filename for time series storage (e.g., elec_s380...json -> elec_s380...h5)
+    # This prevents conflicts when multiple systems are in the same directory
+    time_series_storage_file = filename.parent / f"{filename.stem}.h5"
+    
+    # Default filename that infrasys might have created
+    default_storage_file = filename.parent / "time_series_storage.h5"
 
+    # Close and remove HDF5 file if it exists (must be done before serialization)
+    # This prevents "destination object already exists" errors
+    if hasattr(system._time_series_mgr.storage, '_file') and system._time_series_mgr.storage._file is not None:
+        try:
+            system._time_series_mgr.storage._file.close()
+        except:
+            pass
+    
+    # Remove both the default file and the new matching filename if they exist
+    if default_storage_file.exists():
+        default_storage_file.unlink()
+        logger.debug(f"Removed default storage file: {default_storage_file}")
+    
     if time_series_storage_file.exists():
         time_series_storage_file.unlink()
+        logger.debug(f"Removed existing storage file: {time_series_storage_file}")
+    
+    # Update the storage file path in the system to match our desired filename
+    # This ensures serialize() writes to the correct file
+    # Try multiple possible attribute names that infrasys might use
+    storage = system._time_series_mgr.storage
+    if hasattr(storage, '_file_path'):
+        storage._file_path = str(time_series_storage_file)
+        logger.info(f"Updated storage._file_path to: {time_series_storage_file}")
+    if hasattr(storage, 'file_path'):
+        storage.file_path = str(time_series_storage_file)
+        logger.info(f"Updated storage.file_path to: {time_series_storage_file}")
+    if hasattr(storage, '_filename'):
+        storage._filename = str(time_series_storage_file)
+        logger.info(f"Updated storage._filename to: {time_series_storage_file}")
+    if hasattr(storage, 'filename'):
+        storage.filename = str(time_series_storage_file)
+        logger.info(f"Updated storage.filename to: {time_series_storage_file}")
+    
+    # Log what the storage is actually using
+    logger.info(f"Time series storage file will be: {time_series_storage_file}")
+    logger.info(f"Storage object attributes: {[attr for attr in dir(storage) if 'file' in attr.lower() or 'path' in attr.lower()]}")
 
     output_json: Dict[str, Any] = {
         "units_settings": {
@@ -446,7 +486,7 @@ def infrasys_to_psy(
             "description": None,
             "__metadata__": {"module": "PowerSystems", "type": "SystemMetadata"},
         },
-        "data_format_version": "4.0.0",
+        "data_format_version": "5.0.0",
         "data": {
             "time_series_storage_type": "InfrastructureSystems.Hdf5TimeSeriesStorage",
             "time_series_storage_file": str(time_series_storage_file.name),
@@ -473,23 +513,81 @@ def infrasys_to_psy(
     with open(filename, "wb") as f:
         f.write(dumped_data)
 
-    scaling_factor = orjson.dumps(
+    # Set scaling_factor_multiplier to convert MW time series to per-unit
+    # For PowerLoad: use get_base_power (divides by 100.0 to get per-unit)
+    #   Note: Load time series are named "active_power" (not "max_active_power") to avoid
+    #   PowerSystems v5 bug where get_max_active_power() returns MW instead of per-unit.
+    #   get_max_active_power() will use the static field (per-unit) instead of the time series.
+    # For generators: use get_max_active_power (like r2x-plexos, works in v5)
+    scaling_factor_base = orjson.dumps(
+        {"__metadata__": {"function": "get_base_power", "module": "PowerSystems"}}
+    ).decode()
+    scaling_factor_max = orjson.dumps(
         {"__metadata__": {"function": "get_max_active_power", "module": "PowerSystems"}}
     ).decode()
 
     with system._time_series_mgr._metadata_store._con as conn:
+        # For PowerLoad: Use get_base_power to convert per-unit time series to MW
+        # Time series are stored in per-unit, and get_base_power will multiply by base_power (100.0) to get MW
+        # This is needed for PowerSimulations to use the time series correctly in constraints
         conn.execute(
             """
             UPDATE time_series_associations
             SET scaling_factor_multiplier = IFNULL(scaling_factor_multiplier, '') || ?
+            WHERE owner_type = 'PowerLoad'
             """,
-            (scaling_factor,),
+            (scaling_factor_base,),
+        )
+        # For generators, use get_max_active_power (like r2x-plexos)
+        conn.execute(
+            """
+            UPDATE time_series_associations
+            SET scaling_factor_multiplier = IFNULL(scaling_factor_multiplier, '') || ?
+            WHERE owner_type IN ('ThermalStandard', 'RenewableDispatch', 'HydroDispatch', 'EnergyReservoirStorage')
+            """,
+            (scaling_factor_max,),
         )
     conn.commit()
 
     system._time_series_mgr.storage._serialize_compression_settings()
-    system._time_series_mgr.serialize(
-        {}, filename.parent, "time_series_storage_metadata.db"
-    )
+    
+    # Serialize time series - this writes the HDF5 file and metadata
+    # If the file already exists with objects, we need to ensure it's clean
+    try:
+        system._time_series_mgr.serialize(
+            {}, filename.parent, "time_series_storage_metadata.db"
+        )
+    except RuntimeError as e:
+        if "already exists" in str(e):
+            # If objects already exist, remove both files and try again
+            logger.warning(f"HDF5 file had existing objects, removing and retrying: {e}")
+            if default_storage_file.exists():
+                default_storage_file.unlink()
+            if time_series_storage_file.exists():
+                time_series_storage_file.unlink()
+            system._time_series_mgr.serialize(
+                {}, filename.parent, "time_series_storage_metadata.db"
+            )
+        else:
+            raise
+    
+    # After serialization, check if the file was created with the wrong name
+    # and rename it to match our desired filename
+    if default_storage_file.exists() and not time_series_storage_file.exists():
+        logger.info(f"Renaming {default_storage_file} to {time_series_storage_file}")
+        default_storage_file.rename(time_series_storage_file)
+    elif default_storage_file.exists() and time_series_storage_file.exists():
+        # Both exist - remove the default one
+        logger.info(f"Removing duplicate default file: {default_storage_file}")
+        default_storage_file.unlink()
+    
+    # Verify the correct file exists
+    if not time_series_storage_file.exists():
+        logger.warning(f"Expected HDF5 file {time_series_storage_file} was not created!")
+        # Check what files were actually created
+        h5_files = list(filename.parent.glob("*.h5"))
+        logger.warning(f"Found HDF5 files in {filename.parent}: {h5_files}")
+    else:
+        logger.info(f"✓ HDF5 file created successfully: {time_series_storage_file}")
 
     return
