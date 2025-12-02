@@ -15,6 +15,22 @@ julia tests/run_sienna_ed.jl tests/test_output/elec_s380_c7a_ec_lv1_output_optim
 uv run pytest tests/test_end_to_end.py::test_pypsa_sienna_objective_match -v
 ```
 
+### Optional: System Capacity Comparison
+
+Before running optimization, validate that system capacities match:
+
+```bash
+# Compare PyPSA and Sienna system capacities by category
+uv run pytest tests/test_end_to_end.py::test_compare_pypsa_sienna_systems -v -s
+```
+
+This test:
+- Converts PyPSA network to Sienna JSON (with caching)
+- Compares generator capacities by category (thermal, renewable, hydro)
+- Compares storage capacities
+- Compares load metrics
+- Outputs a detailed comparison table showing differences
+
 ### Optional: Visual Dispatch Comparison
 
 After running steps 1-2, compare dispatch visually:
@@ -44,6 +60,14 @@ End-to-end integration tests for PyPSA → Sienna conversion and validation.
 - **`test_end_to_end_pypsa_to_psy_conversion`**: 
   - Tests basic PyPSA → PSY conversion without optimization
   - Outputs: `elec_s380_c7a_ec_lv1_output.json`
+
+- **`test_compare_pypsa_sienna_systems`**: 
+  - Compares PyPSA and Sienna system metrics without running optimization
+  - Validates that capacities match by category (thermal, renewable, hydro, storage)
+  - Compares loads, generators, storage units, and buses
+  - Uses caching to avoid regenerating JSON files if input hasn't changed
+  - Outputs: `elec_s380_c7a_ec_lv1_comparison.json`, `elec_s380_c7a_ec_lv1_comparison.h5`
+  - To force regeneration: `FORCE_REGENERATE=1 pytest tests/test_end_to_end.py::test_compare_pypsa_sienna_systems -v -s`
 
 ### `run_sienna_ed.jl`
 Julia script that runs Sienna Economic Dispatch on a converted JSON system.
@@ -100,9 +124,3 @@ Demo script for parsing a PyPSA network interactively.
 
 **"Julia script failed"**  
 → Check Julia packages: `julia --project=tests -e 'using PowerSystems, PowerSimulations, Gurobi'`
-
-**"Objectives differ by >5%"**  
-→ Check time series loaded correctly in JSON, verify capacity factors match
-
-**"File not found" errors**  
-→ Ensure you've run `test_e2e_economic_dispatch` before running comparison tests
