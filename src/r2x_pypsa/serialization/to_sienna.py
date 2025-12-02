@@ -513,11 +513,11 @@ def infrasys_to_psy(
     with open(filename, "wb") as f:
         f.write(dumped_data)
 
-    # Set scaling_factor_multiplier to convert MW time series to per-unit
-    # For PowerLoad: use get_base_power (divides by 100.0 to get per-unit)
+    # Set scaling_factor_multiplier for time series
+    # For PowerLoad: Time series are stored in MW (not per-unit), so NO scaling_factor_multiplier needed
     #   Note: Load time series are named "active_power" (not "max_active_power") to avoid
     #   PowerSystems v5 bug where get_max_active_power() returns MW instead of per-unit.
-    #   get_max_active_power() will use the static field (per-unit) instead of the time series.
+    #   PowerSimulations StaticPowerLoad will use the time series values directly in MW.
     # For generators: use get_max_active_power (like r2x-plexos, works in v5)
     scaling_factor_base = orjson.dumps(
         {"__metadata__": {"function": "get_base_power", "module": "PowerSystems"}}
@@ -527,23 +527,16 @@ def infrasys_to_psy(
     ).decode()
 
     with system._time_series_mgr._metadata_store._con as conn:
-        # For PowerLoad: Use get_base_power to convert per-unit time series to MW
-        # Time series are stored in per-unit, and get_base_power will multiply by base_power (100.0) to get MW
-        # This is needed for PowerSimulations to use the time series correctly in constraints
-        conn.execute(
-            """
-            UPDATE time_series_associations
-            SET scaling_factor_multiplier = IFNULL(scaling_factor_multiplier, '') || ?
-            WHERE owner_type = 'PowerLoad'
-            """,
-            (scaling_factor_base,),
-        )
+        # For PowerLoad: Time series are stored in per-unit (0-1, where 1.0 = max_active_power)
+        # PowerSimulations StaticPowerLoad multiplies by get_max_active_power() (in MW) to get MW
+        # So NO scaling_factor_multiplier needed - PowerSimulations handles the scaling
+        # Do NOT set scaling_factor_multiplier for PowerLoad
         # For generators, use get_max_active_power (like r2x-plexos)
         conn.execute(
             """
             UPDATE time_series_associations
             SET scaling_factor_multiplier = IFNULL(scaling_factor_multiplier, '') || ?
-            WHERE owner_type IN ('ThermalStandard', 'RenewableDispatch', 'HydroDispatch', 'EnergyReservoirStorage')
+            WHERE owner_type IN ('ThermalStandard', 'RenewableDispatch', 'EnergyReservoirStorage')
             """,
             (scaling_factor_max,),
         )

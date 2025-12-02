@@ -1,20 +1,19 @@
-# ============================================================
-# Julia Environment for r2x-pypsa Tests
-# ============================================================
-# This is the Julia Project.toml (NOT Python's pyproject.toml)
-# It defines Julia package dependencies for Sienna/PowerSystems
-# ============================================================
-
 name = "r2x-pypsa-tests"
 
 [deps]
-PowerSystems = "bcd98974-b02a-5e2f-9ee0-a103f5c450dd"
-PowerSimulations = "e690365d-45e2-57bb-ac84-44ba829e73c4"
+CSV = "336ed68f-0bac-5ca0-87d4-7b16caf5d00b"
+DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
 Gurobi = "2e9cd046-0924-5485-92f1-d5272153d98b"
+HydroPowerSimulations = "fc1677e0-6ad7-4515-bf3a-bd6bf20a0b1b"
+PowerSimulations = "e690365d-45e2-57bb-ac84-44ba829e73c4"
+PowerSystems = "bcd98974-b02a-5e2f-9ee0-a103f5c450dd"
+StorageSystemsSimulations = "e2f1a126-19d0-4674-9252-42b2384f8e3c"
+TimeSeries = "9e3dc215-6440-5c97-bce1-76c03772f85e"
 
 [compat]
-PowerSystems = "5.2.0"
-PowerSimulations = "0.31.0"
 Gurobi = "1.7.6"
+HydroPowerSimulations = "0.12"
+PowerSimulations = "0.31.0"
+PowerSystems = "5.2.0"
+StorageSystemsSimulations = "0.13"
 julia = "1.12.1"
-

@@ -282,23 +282,30 @@ def _(
     # Determine generator type from carrier or category
     carrier = get_pypsa_property(pypsa_system, component, "carrier")
     if not carrier:
-        logger.warning(f"Generator {component.name} has no carrier, skipping")
+        # Check if it's renewable based on name or other attributes
+        is_renewable = any(keyword in component.name.lower() for keyword in ['wind', 'solar', 'hydro', 'renewable'])
+        gen_type = "renewable" if is_renewable else "thermal/other"
+        logger.warning(f"Generator {component.name} ({gen_type}) has no carrier, skipping")
         return
 
     # Map carrier to generator class
     generator_model = generator_mapping.get(carrier, ThermalStandard)
     prime_mover = prime_mover_mapping.get(carrier, PrimeMoversType.OT)
+    
+    # Check if it's a renewable generator
+    is_renewable = carrier in ['solar', 'onwind', 'offwind', 'offwind_floating', 'wind', 'hydro', 'ror']
+    gen_type = "renewable" if is_renewable else "thermal/other"
 
     # Find the bus for this generator
     bus_name = component.bus  # bus is a string attribute, not a PypsaProperty
     if not bus_name:
-        logger.warning(f"Generator {component.name} has no bus connection")
+        logger.warning(f"{gen_type.capitalize()} generator {component.name} (carrier={carrier}) has no bus connection, skipping")
         return
 
     try:
         bus = psy_system.get_component(ACBus, bus_name)
     except Exception:
-        logger.warning(f"Could not find bus {bus_name} for generator {component.name}")
+        logger.warning(f"Could not find bus {bus_name} for {gen_type} generator {component.name} (carrier={carrier}), skipping")
         return
 
     # Create generator with appropriate model
@@ -314,7 +321,7 @@ def _(
         generator.fuel = fuel_mapping[carrier]
 
     # Set operation cost
-    if isinstance(generator, (ThermalStandard, HydroDispatch, RenewableDispatch)):
+    if isinstance(generator, (ThermalStandard, RenewableDispatch)):
         generator.operation_cost = create_operational_cost(
             generator, component, pypsa_system
         )
@@ -322,39 +329,105 @@ def _(
     # Set capacity and limits
     p_nom = get_pypsa_property(pypsa_system, component, "p_nom")
     if p_nom is None or p_nom < 0:
-        logger.warning(f"Generator {component.name} has invalid capacity")
+        logger.warning(f"{gen_type.capitalize()} generator {component.name} (carrier={carrier}) has invalid capacity (p_nom={p_nom}), skipping")
         return
     elif p_nom == 0:
-        logger.info(f"Generator {component.name} has zero capacity, indicating future build.")
+        logger.info(f"{gen_type.capitalize()} generator {component.name} (carrier={carrier}) has zero capacity, indicating future build. Skipping.")
         return
 
     # Get power limits
+    # IMPORTANT: For p_max_pu, we need the STATIC value (nameplate = 1.0), not the time series mean/max (capacity factor)
+    # The time series represents capacity factor over time, but the static limit should be nameplate capacity
+    # NOTE: The parser sets p_max_pu.value to series.mean() when a time series exists, which is wrong for capacity limits
+    # We need to use 1.0 (nameplate) if there's a time series, or the static value if no time series
     p_min_pu = get_pypsa_property(pypsa_system, component, "p_min_pu") or 0.0
-    p_max_pu = get_pypsa_property(pypsa_system, component, "p_max_pu") or 1.0
+    
+    # Check if p_max_pu has a time series - if so, use 1.0 (nameplate) regardless of static value
+    # If no time series, use the static value (or default to 1.0)
+    p_max_pu_prop = getattr(component, "p_max_pu", None)
+    if p_max_pu_prop is not None:
+        # Check if there's a time series
+        if hasattr(p_max_pu_prop, "has_time_series") and p_max_pu_prop.has_time_series():
+            # Time series exists - use 1.0 (nameplate) for static limit
+            # The time series itself will be used for dispatch constraints
+            p_max_pu = 1.0
+        elif hasattr(p_max_pu_prop, "value") and p_max_pu_prop.value is not None:
+            # No time series - use static value
+            p_max_pu = float(p_max_pu_prop.value)
+        else:
+            # No value set - default to 1.0
+            p_max_pu = 1.0
+    else:
+        # No p_max_pu property - default to 1.0
+        p_max_pu = 1.0
 
     generator.base_power = p_nom
-    generator.active_power_limits = create_minmax_from_pypsa(
-        p_min_pu * p_nom, p_max_pu * p_nom, p_nom
-    )
+    
+    # For RenewableDispatch, get_max_active_power() returns rating * power_factor * base_power
+    # RenewableDispatch does NOT have active_power_limits field - max power is determined by rating * power_factor
+    # Set rating to 1.0 (per-unit, nameplate capacity) and power_factor to 1.0
+    # so that get_max_active_power() returns base_power = p_nom (the nameplate capacity)
+    if isinstance(generator, RenewableDispatch):
+        generator.rating = 1.0  # Per-unit rating (1.0 = nameplate capacity)
+        generator.power_factor = 1.0  # Power factor = 1.0 for full active power capability
+    else:
+        # For ThermalStandard and other generators, set active_power_limits
+        generator.active_power_limits = create_minmax_from_pypsa(
+            p_min_pu * p_nom, p_max_pu * p_nom, p_nom
+        )
 
     generator.services = []
     psy_system.add_component(generator)
 
     # Handle time series - extract from PypsaProperty if it exists
-    # For renewable generators, p_max_pu is the capacity factor time series (per-unit 0-1)
-    # Convert to MW by multiplying by p_nom (like r2x-plexos converts rating_factor to MW)
+    # For renewable and hydro generators, p_max_pu is the capacity factor time series (per-unit 0-1)
+    # Store in per-unit (0-1) - PowerSimulations will multiply by get_max_active_power() to get MW
+    # This works correctly with FixedOutput for hydro (must-run at available capacity)
     if hasattr(component, "p_max_pu"):
         if hasattr(component.p_max_pu, "has_time_series") and component.p_max_pu.has_time_series():
             ts_data = component.p_max_pu.get_time_series()
-            # Convert capacity factor (per-unit) to MW
+            
+            # Validate time series is in per-unit range (0-1)
+            # PyPSA p_max_pu should already be in per-unit, but verify
             if hasattr(ts_data, 'values'):
-                ts_data_mw = ts_data * p_nom
+                ts_values = ts_data.values if hasattr(ts_data.values, '__iter__') else [ts_data.values]
+                ts_min = float(min(ts_values)) if len(ts_values) > 0 else 0.0
+                ts_max = float(max(ts_values)) if len(ts_values) > 0 else 0.0
+                ts_mean = float(sum(ts_values) / len(ts_values)) if len(ts_values) > 0 else 0.0
+                
+                # Check if values are outside expected per-unit range (0-1)
+                # If max > 1.0, might be in MW instead of per-unit - need to normalize
+                if ts_max > 1.5:  # Likely in MW, not per-unit
+                    logger.warning(
+                        f"Generator {component.name} time series max={ts_max:.2f} > 1.5, "
+                        f"appears to be in MW not per-unit. Normalizing by p_nom={p_nom:.2f} MW"
+                    )
+                    # Normalize by p_nom to convert to per-unit
+                    ts_data = ts_data / p_nom
+                    ts_max = ts_max / p_nom
+                    ts_mean = ts_mean / p_nom
+                elif ts_max > 1.0:
+                    logger.warning(
+                        f"Generator {component.name} time series max={ts_max:.2f} > 1.0, "
+                        f"clamping to 1.0 (per-unit range)"
+                    )
+                    ts_data = ts_data.clip(upper=1.0)
+                    ts_max = 1.0
+                
+                logger.info(
+                    f"Added time series for generator {component.name}: "
+                    f"length={len(ts_data)}, min={ts_min:.3f}, max={ts_max:.3f}, mean={ts_mean:.3f} "
+                    f"(per-unit), p_nom={p_nom:.2f} MW, "
+                    f"rating={generator.rating if isinstance(generator, RenewableDispatch) else 'N/A'}, "
+                    f"power_factor={generator.power_factor if isinstance(generator, RenewableDispatch) else 'N/A'}"
+                )
             else:
-                import pandas as pd
-                ts_data_mw = pd.Series(ts_data.values * p_nom, index=ts_data.index)
-            ts = create_single_time_series_from_pandas(ts_data_mw, "max_active_power")
+                logger.info(f"Added time series for generator {component.name} (length: {len(ts_data)}, stored in per-unit 0-1)")
+            
+            # Keep time series in per-unit (0-1) - scaling_factor_multiplier will multiply by get_max_active_power()
+            # For FixedOutput, this ensures the generator dispatches at the time series value (in MW after scaling)
+            ts = create_single_time_series_from_pandas(ts_data, "max_active_power")
             psy_system.add_time_series(ts, generator)
-            logger.info(f"Added time series for generator {component.name} (length: {len(ts_data)}, converted to MW)")
         else:
             logger.debug(f"Generator {component.name} p_max_pu has no time series")
 
@@ -457,35 +530,56 @@ def _(
         logger.warning(f"Could not find bus {bus_name} for load {component.name}")
         return
 
-    # Get load value (in MW)
-    p_set = get_pypsa_property(pypsa_system, component, "p_set") or 0.0
-    
     # Use fixed base_power like r2x-plexos (100.0 MW)
     base_power = 100.0  # Fixed base power in MW
     
-    # Check if there's a time series to determine max load value
-    # Time series will be converted to per-unit later, so we need max in MW for static field
+    # Extract max load value from time series or static value (in MW)
+    # IMPORTANT: Get the raw time series data directly from PypsaProperty, not via get_pypsa_property
+    # which might return the wrong value (mean instead of max, or already scaled)
+    max_load_value_mw = 0.0
     has_ts = False
-    max_load_value_mw = abs(p_set) if isinstance(p_set, (int, float)) else 0.0
     
     if hasattr(component, "p_set"):
         try:
             if hasattr(component.p_set, "has_time_series") and component.p_set.has_time_series():
                 has_ts = True
                 ts_data = component.p_set.get_time_series()
-                # Get max value from time series (in MW)
+                # Get max value from time series (time series is in MW from PyPSA)
                 if hasattr(ts_data, 'max'):
-                    max_load_value_mw = max(abs(ts_data.max()), abs(ts_data.min()), abs(p_set) if isinstance(p_set, (int, float)) else 0.0)
+                    max_load_value_mw = max(abs(ts_data.max()), abs(ts_data.min()))
                 elif hasattr(ts_data, 'values'):
-                    max_load_value_mw = max(abs(ts_data.values.max()), abs(ts_data.values.min()), abs(p_set) if isinstance(p_set, (int, float)) else 0.0)
+                    max_load_value_mw = max(abs(ts_data.values.max()), abs(ts_data.values.min()))
+            else:
+                # No time series - use static value
+                if hasattr(component.p_set, "value") and component.p_set.value is not None:
+                    max_load_value_mw = abs(float(component.p_set.value))
         except Exception as e:
-            logger.warning(f"Could not check time series for load {component.name}: {e}")
+            logger.warning(f"Could not extract load value for {component.name}: {e}")
+            # Fallback to get_pypsa_property
+            p_set = get_pypsa_property(pypsa_system, component, "p_set") or 0.0
+            max_load_value_mw = abs(p_set) if isinstance(p_set, (int, float)) else 0.0
     
     # IMPORTANT: max_active_power static field should be stored in per-unit (relative to base_power)
     # When get_value() is called with NATURAL_UNITS, it multiplies by base_power to convert to MW
     # Documentation: "max_active_power = 1.0, # 10 MW per-unitized by device base_power"
     max_active_power_pu = max_load_value_mw / base_power if max_load_value_mw > 0 else 0.0  # Per-unit
-    active_power_pu = (p_set / base_power) if isinstance(p_set, (int, float)) and p_set != 0 else 0.0
+    
+    # Get active_power (static value) - use mean if time series exists, otherwise static value
+    if has_ts and hasattr(component.p_set, "get_time_series"):
+        try:
+            ts_data = component.p_set.get_time_series()
+            # Use mean for static active_power
+            active_power_mw = float(ts_data.mean()) if hasattr(ts_data, 'mean') else 0.0
+        except:
+            active_power_mw = 0.0
+    else:
+        # No time series - use static value
+        if hasattr(component.p_set, "value") and component.p_set.value is not None:
+            active_power_mw = float(component.p_set.value)
+        else:
+            active_power_mw = 0.0
+    
+    active_power_pu = active_power_mw / base_power if active_power_mw != 0 else 0.0
 
     load = PowerLoad(
         name=component.name,
@@ -500,23 +594,26 @@ def _(
     psy_system.add_component(load)
 
     # Handle time series - extract from PypsaProperty if it exists
-    # Use "active_power" instead of "max_active_power" to avoid PowerSystems v5 bug where
-    # get_max_active_power() returns MW instead of per-unit when a time series named "max_active_power" exists.
-    # PowerSimulations StaticPowerLoad will still use this time series for constraints.
+    # Use "max_active_power" (default) - PowerSimulations StaticPowerLoad multiplies time series by get_max_active_power() (in MW),
+    # so time series must be in per-unit (0-1) where 1.0 = max_active_power.
+    # IMPORTANT: Store time series in per-unit (divide by max_active_power) - PowerSimulations will multiply by get_max_active_power() to get MW
     if hasattr(component, "p_set"):
         try:
             if hasattr(component.p_set, "has_time_series") and component.p_set.has_time_series():
                 ts_data = component.p_set.get_time_series()
-                # Convert to per-unit (divide by base_power)
-                # Store as "active_power" (not "max_active_power") to avoid PowerSystems v5 bug
-                if hasattr(ts_data, 'values'):
-                    ts_data_pu = ts_data / base_power
+                # Convert to per-unit: divide by max_active_power (in MW)
+                # PowerSimulations will multiply by get_max_active_power() to get back to MW
+                if max_load_value_mw > 0:
+                    if hasattr(ts_data, 'values'):
+                        ts_data_pu = ts_data / max_load_value_mw
+                    else:
+                        import pandas as pd
+                        ts_data_pu = pd.Series(ts_data.values / max_load_value_mw, index=ts_data.index)
+                    ts = create_single_time_series_from_pandas(ts_data_pu, "max_active_power")
+                    psy_system.add_time_series(ts, load)
+                    logger.info(f"Added time series for load {component.name} (length: {len(ts_data)}, as 'max_active_power' in per-unit, max={max_load_value_mw} MW)")
                 else:
-                    import pandas as pd
-                    ts_data_pu = pd.Series(ts_data.values / base_power, index=ts_data.index)
-                ts = create_single_time_series_from_pandas(ts_data_pu, "active_power")
-                psy_system.add_time_series(ts, load)
-                logger.info(f"Added time series for load {component.name} (length: {len(ts_data)}, as 'active_power' in per-unit)")
+                    logger.warning(f"Load {component.name} has zero max_load_value_mw, skipping time series")
             else:
                 logger.debug(f"Load {component.name} p_set has no time series")
         except Exception as e:
@@ -561,15 +658,23 @@ def _(
     p_min_pu = get_pypsa_property(pypsa_system, component, "p_min_pu") or -1.0
     p_max_pu = get_pypsa_property(pypsa_system, component, "p_max_pu") or 1.0
 
+    # Calculate base_power and per-unit limits
+    base_power = max(p_nom, 0.001)
+    # Power limits should be in per-unit (like rating)
+    # When get_value() is called with Val(:mva), it multiplies by base_power to convert to MW
+    # So max should be 1.0 (per-unit) to match rating
+    max_power_pu = 1.0  # Per-unit (nameplate capacity)
+    
     battery = EnergyReservoirStorage(
         uuid=component.uuid,
         name=component.name,
         bus=bus,
-        base_power=max(p_nom, 0.001),
+        base_power=base_power,
+        rating=1.0,  # Per-unit rating (1.0 = nameplate capacity)
         initial_storage_capacity_level=state_of_charge_initial / storage_capacity if storage_capacity > 0 else 0.0,
         efficiency=create_inputoutput_from_pypsa(efficiency_store, efficiency_dispatch),
-        input_active_power_limits=MinMax(min=0, max=p_nom),
-        output_active_power_limits=MinMax(min=0, max=p_nom),
+        input_active_power_limits=MinMax(min=0, max=max_power_pu),  # Per-unit
+        output_active_power_limits=MinMax(min=0, max=max_power_pu),  # Per-unit
         discharge_efficiency=efficiency_dispatch,
         storage_technology_type=StorageTechs.LIB,
         prime_mover_type=PrimeMoversType.BA,
@@ -634,15 +739,23 @@ def _(
     p_nom = e_nom  # Assume 1-hour discharge rate
     efficiency = 1.0 - standing_loss  # Convert standing loss to efficiency
     
+    # Calculate base_power and per-unit limits
+    base_power = max(p_nom, 0.001)
+    # Power limits should be in per-unit (like rating)
+    # When get_value() is called with Val(:mva), it multiplies by base_power to convert to MW
+    # So max should be 1.0 (per-unit) to match rating
+    max_power_pu = 1.0  # Per-unit (nameplate capacity)
+    
     store = EnergyReservoirStorage(
         uuid=component.uuid,
         name=component.name,
         bus=psy_bus,
-        base_power=max(p_nom, 0.001),
+        base_power=base_power,
+        rating=1.0,  # Per-unit rating (1.0 = nameplate capacity)
         initial_storage_capacity_level=0.5,  # Default to 50% initial charge
         efficiency=InputOutput(input=efficiency, output=efficiency),
-        input_active_power_limits=MinMax(min=0, max=p_nom),
-        output_active_power_limits=MinMax(min=0, max=p_nom),
+        input_active_power_limits=MinMax(min=0, max=max_power_pu),  # Per-unit
+        output_active_power_limits=MinMax(min=0, max=max_power_pu),  # Per-unit
         discharge_efficiency=efficiency,
         storage_technology_type=StorageTechs.LIB,  # Default to lithium-ion battery
         prime_mover_type=PrimeMoversType.BA,

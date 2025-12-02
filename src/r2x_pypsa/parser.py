@@ -203,7 +203,14 @@ class PypsaParser(BaseParser):
                 logger.debug(f"Added generator {gen_name} with carrier {gen_data.get('carrier', 'unknown')}")
                 
             except Exception as e:
-                logger.warning(f"Failed to process generator {gen_name}: {e}")
+                carrier = gen_data.get('carrier', 'unknown')
+                p_nom = gen_data.get('p_nom', 0.0)
+                # Check if it's a renewable generator
+                is_renewable = carrier in ['solar', 'onwind', 'offwind', 'offwind_floating', 'wind', 'hydro', 'ror']
+                gen_type = "renewable" if is_renewable else "thermal/other"
+                logger.warning(
+                    f"Failed to process {gen_type} generator {gen_name} (carrier={carrier}, p_nom={p_nom}): {e}"
+                )
                 continue
     
     def _process_storage_units(self, system: System) -> None:

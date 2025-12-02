@@ -55,13 +55,14 @@ def plot_generator_marginal_costs(network):
     plt.show()
 
 
-def plot_energy_balance(network, timesteps):
+def plot_energy_balance(network, timesteps, label="PyPSA"):
     """
     Plots the energy balance timeseries for a given network and number of timesteps.
 
     Parameters:
     network: The network object containing the energy data.
     timesteps: The number of timesteps to plot.
+    label: Label for the plot (default: "PyPSA").
     """
     # Prepare the data
     energy_balance = (
@@ -104,12 +105,84 @@ def plot_energy_balance(network, timesteps):
     ymax = energy_pos.sum(axis=1).max()
     ax.set_ylim(ymin, ymax)
 
-    ax.set_title("Energy Balance Timeseries (Positive and Negative Values)")
+    ax.set_title(f"{label} Energy Balance Timeseries (Positive and Negative Values)")
     ax.set_ylabel("Supply (MW)")
     ax.set_xlabel("Time")
     # Combine legends from both plots
     handles, labels = ax.get_legend_handles_labels()
     ax.legend(handles, labels, bbox_to_anchor=(1, 0), loc="lower left", title=None, ncol=1)
+    plt.show()
+    return fig, ax
+
+
+def plot_sienna_energy_balance(dispatch_file, timesteps=None, label="Sienna"):
+    """
+    Plots the energy balance timeseries from Sienna dispatch results.
+
+    Parameters:
+    dispatch_file: Path to CSV file with Sienna dispatch data (columns: DateTime, carrier, value).
+    timesteps: Number of timesteps to plot (default: None, plots all). Use 7*24 for 1 week.
+    label: Label for the plot (default: "Sienna").
+    """
+    import pandas as pd
+    from pathlib import Path
+    
+    dispatch_file = Path(dispatch_file)
+    if not dispatch_file.exists():
+        raise FileNotFoundError(f"Sienna dispatch file not found: {dispatch_file}")
+    
+    # Read dispatch data
+    df = pd.read_csv(dispatch_file)
+    
+    # Pivot to get carriers as columns, time as index
+    if 'DateTime' in df.columns:
+        df['DateTime'] = pd.to_datetime(df['DateTime'])
+        energy_balance = df.pivot_table(
+            index='DateTime',
+            columns='carrier',
+            values='value',
+            aggfunc='sum'
+        ).fillna(0)
+    else:
+        # Fallback if DateTime column doesn't exist
+        energy_balance = df.pivot_table(
+            index=df.index,
+            columns='carrier',
+            values='value',
+            aggfunc='sum'
+        ).fillna(0)
+    
+    # Limit to specified number of timesteps (e.g., 7*24 = 168 for 1 week)
+    if timesteps is not None:
+        energy_balance = energy_balance.iloc[:timesteps]
+    
+    # Separate positive and negative values
+    energy_pos = energy_balance.clip(lower=0)
+    energy_neg = energy_balance.clip(upper=0)
+    
+    # Plot both positive and negative values
+    fig, ax = plt.subplots(figsize=(10, 5))
+    energy_pos.plot.area(
+        ax=ax,
+        stacked=True,
+        legend=True,
+    )
+    energy_neg.plot.area(
+        ax=ax,
+        stacked=True,
+        legend=False,
+    )
+    
+    # Fix y-limits to show the full range of data
+    ymin = energy_neg.sum(axis=1).min()
+    ymax = energy_pos.sum(axis=1).max()
+    ax.set_ylim(ymin, ymax)
+    
+    ax.set_title(f"{label} Energy Balance Timeseries (Positive and Negative Values)")
+    ax.set_ylabel("Supply (MW)")
+    ax.set_xlabel("Time")
+    ax.legend(bbox_to_anchor=(1, 0), loc="lower left", title="Carrier", ncol=1)
+    plt.tight_layout()
     plt.show()
     return fig, ax
 

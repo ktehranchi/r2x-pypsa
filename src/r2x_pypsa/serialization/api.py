@@ -86,8 +86,10 @@ def create_default_mapping() -> Dict[str, Any]:
             "solar": RenewableDispatch,
             "onwind": RenewableDispatch,
             "offwind": RenewableDispatch,
-            "offwind_floating": RenewableDispatch, 
-            "hydro": HydroDispatch,
+            "offwind_floating": RenewableDispatch,
+            "wind": RenewableDispatch,  # Alias for onwind (backward compatibility)
+            "hydro": RenewableDispatch,  # Curtailable hydro (matches PyPSA behavior)
+            "ror": RenewableDispatch,  # Run-of-river hydro
             
             # Storage carriers
             "battery": EnergyReservoirStorage,
@@ -96,6 +98,8 @@ def create_default_mapping() -> Dict[str, Any]:
             # Gas turbine variants (common in PyPSA examples)
             "OCGT": ThermalStandard,  # Open Cycle Gas Turbine
             "CCGT": ThermalStandard,  # Combined Cycle Gas Turbine
+            "CCGT-95CCS": ThermalStandard,  # Combined Cycle Gas Turbine with 95% CCS
+            "hydrogen_ct": ThermalStandard,  # Hydrogen combustion turbine
             
             # Other common carriers
             "other": ThermalStandard,
@@ -111,13 +115,17 @@ def create_default_mapping() -> Dict[str, Any]:
             "geothermal": PrimeMoversType.OT,  # Other
             "solar": PrimeMoversType.PVe,  # Photovoltaic
             "onwind": PrimeMoversType.WT,   # Wind Turbine
-            "offwind": PrimeMoversType.WT,  # Wind Turbine
-            "offwind_floating": PrimeMoversType.WT,  # Wind Turbine
+            "offwind": PrimeMoversType.WT,   # Wind Turbine
+            "offwind_floating": PrimeMoversType.WT,   # Wind Turbine
+            "wind": PrimeMoversType.WT,   # Wind Turbine (alias)
             "hydro": PrimeMoversType.HY,  # Hydro
+            "ror": PrimeMoversType.HY,  # Run-of-river hydro
+            "OCGT": PrimeMoversType.GT,  # Open Cycle Gas Turbine
+            "CCGT": PrimeMoversType.GT,  # Combined Cycle Gas Turbine
+            "CCGT-95CCS": PrimeMoversType.GT,  # Combined Cycle Gas Turbine with CCS
+            "hydrogen_ct": PrimeMoversType.GT,  # Hydrogen combustion turbine
             "battery": PrimeMoversType.BA,  # Battery
             "pumped_hydro": PrimeMoversType.HY,  # Hydro
-            "OCGT": PrimeMoversType.GT,  # Gas Turbine
-            "CCGT": PrimeMoversType.GT,  # Gas Turbine
             "other": PrimeMoversType.OT,  # Other
         },
         "fuel_mapping": {
@@ -129,6 +137,10 @@ def create_default_mapping() -> Dict[str, Any]:
             "biomass": ThermalFuels.OTHER,
             "waste": ThermalFuels.OTHER,
             "geothermal": ThermalFuels.GEOTHERMAL,
+            "OCGT": ThermalFuels.NATURAL_GAS,  # Open Cycle Gas Turbine
+            "CCGT": ThermalFuels.NATURAL_GAS,  # Combined Cycle Gas Turbine
+            "CCGT-95CCS": ThermalFuels.NATURAL_GAS,  # Combined Cycle Gas Turbine with CCS
+            "hydrogen_ct": ThermalFuels.OTHER_GAS,  # Hydrogen combustion turbine (hydrogen is a gas fuel)
             "solar": ThermalFuels.OTHER,
             "onwind": ThermalFuels.OTHER,
             "offwind": ThermalFuels.OTHER,
@@ -136,8 +148,6 @@ def create_default_mapping() -> Dict[str, Any]:
             "hydro": ThermalFuels.OTHER,
             "battery": ThermalFuels.OTHER,
             "pumped_hydro": ThermalFuels.OTHER,
-            "OCGT": ThermalFuels.NATURAL_GAS,
-            "CCGT": ThermalFuels.NATURAL_GAS,
             "other": ThermalFuels.OTHER,
         },
     }

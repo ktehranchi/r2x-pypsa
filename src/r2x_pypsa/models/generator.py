@@ -65,8 +65,7 @@ class PypsaGenerator(Component):
         Units("MW"),
         Field(
             alias="Minimum Nominal Power",
-            description="If `p_nom` is extendable in optimization, set its minimum value.",
-            ge=0,
+            description="If `p_nom` is extendable in optimization, set its minimum value. Must be >= 0.",
         ),
     ] = PypsaProperty.create(value=0.0, units="MW")
     
@@ -249,9 +248,7 @@ class PypsaGenerator(Component):
         PropertyType,
         Field(
             alias="Minimum Power Per Unit",
-            description="The minimum output for each snapshot per unit of `p_nom` for the optimization (e.g. a minimal dispatch level for conventional power plants). Note that if `committable=False` and `p_min_pu>0`, this represents a must-run condition.",
-            ge=0,
-            le=1,
+            description="The minimum output for each snapshot per unit of `p_nom` for the optimization (e.g. a minimal dispatch level for conventional power plants). Note that if `committable=False` and `p_min_pu>0`, this represents a must-run condition. Must be between 0 and 1 (per-unit).",
         ),
     ] = PypsaProperty.create(value=0.0)
     
@@ -259,9 +256,7 @@ class PypsaGenerator(Component):
         PropertyType,
         Field(
             alias="Maximum Power Per Unit",
-            description="The maximum output for each snapshot per unit of `p_nom` for the optimization (e.g. changing availability of renewable generators due to weather conditions or a de-rating of conventional power plants).",
-            ge=0,
-            le=1,
+            description="The maximum output for each snapshot per unit of `p_nom` for the optimization (e.g. changing availability of renewable generators due to weather conditions or a de-rating of conventional power plants). Must be between 0 and 1 (per-unit).",
         ),
     ] = PypsaProperty.create(value=1.0)
     
@@ -280,8 +275,7 @@ class PypsaGenerator(Component):
         Units("usd/MWh"),
         Field(
             alias="Marginal Cost",
-            description="Marginal cost of production of 1 MWh.",
-            ge=0,
+            description="Marginal cost of production of 1 MWh. Can be negative (e.g., for renewable generators with tax credits).",
         ),
     ] = PypsaProperty.create(value=0.0, units="usd/MWh")
     
@@ -290,8 +284,7 @@ class PypsaGenerator(Component):
         Units("usd/MWh^2"),
         Field(
             alias="Marginal Cost Quadratic",
-            description="Quadratic marginal cost of production of 1 MWh.",
-            ge=0,
+            description="Quadratic marginal cost of production of 1 MWh. Can be negative (e.g., for renewable generators with tax credits).",
         ),
     ] = PypsaProperty.create(value=0.0, units="usd/MWh^2")
     
@@ -330,6 +323,94 @@ class PypsaGenerator(Component):
             description="Maximum active power decrease from one snapshot to the next, per unit of the nominal power. Ignored if NaN. Does not consider snapshot weightings.",
         ),
     ] = PypsaProperty.create(value=float('nan'))
+
+    @field_validator('p_nom_min', mode='before')
+    @classmethod
+    def validate_p_nom_min(cls, v: Any) -> Any:
+        """Validate that p_nom_min is non-negative.
+        
+        p_nom_min must be >= 0 (minimum capacity cannot be negative).
+        If the value is negative or NaN, it clamps to 0.
+        """
+        if isinstance(v, PypsaProperty):
+            # Check the static value
+            if v.value is not None:
+                try:
+                    val = float(v.value)
+                    if val < 0 or (val != val):  # Check for NaN
+                        # Clamp to 0
+                        v.value = 0.0
+                except (ValueError, TypeError):
+                    v.value = 0.0
+            
+            # Check time series values - clamp negatives to 0
+            if v.time_series is not None and not v.time_series.empty:
+                # Replace negative values and NaN with 0
+                v.time_series = v.time_series.clip(lower=0.0).fillna(0.0)
+        
+        return v
+    
+    @field_validator('p_min_pu', 'p_max_pu', mode='before')
+    @classmethod
+    def validate_power_per_unit(cls, v: Any) -> Any:
+        """Validate that p_min_pu and p_max_pu are in valid per-unit range (0-1).
+        
+        p_min_pu and p_max_pu must be between 0 and 1 (per-unit values).
+        Values > 1 are clamped to 1.0, values < 0 are clamped to 0.0, NaN is replaced with 0.0.
+        """
+        if isinstance(v, PypsaProperty):
+            # Check the static value
+            if v.value is not None:
+                try:
+                    val = float(v.value)
+                    if val != val:  # Check for NaN
+                        v.value = 0.0
+                    elif val < 0:
+                        v.value = 0.0
+                    elif val > 1:
+                        # Clamp to 1.0 (per-unit max) - this is valid for overrating scenarios
+                        v.value = 1.0
+                except (ValueError, TypeError):
+                    v.value = 0.0
+            
+            # Check time series values - clamp to [0, 1] range
+            if v.time_series is not None and not v.time_series.empty:
+                # Clip to [0, 1] range and fill NaN with 0
+                # Check if any values exceed 1.0 before clipping
+                max_val = v.time_series.max()
+                if max_val > 1.0:
+                    # Log warning for debugging
+                    from loguru import logger
+                    logger.debug(f"p_max_pu time series has values > 1.0 (max={max_val:.3f}), clamping to 1.0")
+                v.time_series = v.time_series.clip(lower=0.0, upper=1.0).fillna(0.0)
+        
+        return v
+    
+    @field_validator('marginal_cost', 'marginal_cost_quadratic', mode='before')
+    @classmethod
+    def validate_marginal_cost(cls, v: Any) -> Any:
+        """Validate that marginal_cost values are numeric (can be negative).
+        
+        Marginal costs can be negative (e.g., for renewable generators with tax credits).
+        Only validates that values are numeric, not NaN.
+        """
+        if isinstance(v, PypsaProperty):
+            # Check the static value - only validate it's numeric, not that it's >= 0
+            if v.value is not None:
+                try:
+                    val = float(v.value)
+                    if val != val:  # Check for NaN only
+                        # Replace NaN with 0
+                        v.value = 0.0
+                except (ValueError, TypeError):
+                    v.value = 0.0
+            
+            # Check time series values - only replace NaN, allow negatives
+            if v.time_series is not None and not v.time_series.empty:
+                # Only fill NaN, don't clip negatives
+                v.time_series = v.time_series.fillna(0.0)
+        
+        return v
 
     @classmethod
     def example(cls) -> "PypsaGenerator":
