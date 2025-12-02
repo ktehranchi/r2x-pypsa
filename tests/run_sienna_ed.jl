@@ -1048,20 +1048,6 @@ if objective !== nothing
                 end
                 println("Total Zero Dispatch Timesteps: $total_zero")
                 println("Average Generator Utilization: $(round(avg_utilization, digits=1))%")
-                
-                # Save detailed comparison to CSV
-                comparison_file = joinpath(dirname(output_file), "hydro_dispatch_comparison.csv")
-                CSV.write(comparison_file, hydro_summary)
-                println("\n✓ Detailed comparison saved to: $comparison_file")
-            end
-            
-            # Export per-generator dispatch for plotting
-            println("\nExporting per-generator hydro dispatch for comparison...")
-            per_gen_file = joinpath(dirname(output_file), "sienna_hydro_per_generator.csv")
-            if !isempty(hydro_df)
-                CSV.write(per_gen_file, hydro_df)
-                println("✓ Per-generator dispatch saved to: $per_gen_file")
-                println("  Use this file to compare with PyPSA dispatch timestep-by-timestep")
             end
         catch e
             println("  Could not generate hydro comparison: $e")

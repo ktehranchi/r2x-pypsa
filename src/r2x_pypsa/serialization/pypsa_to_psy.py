@@ -186,25 +186,6 @@ def pypsa_component_to_psy(
     )
 
 
-@singledispatch
-def pypsa_component_to_psy_additions(
-    component: Component,
-    pypsa_system: System,
-    psy_system: System,
-):
-    """Create new PowerSystems.jl components to match PyPSA model.
-
-    Parameters
-    ----------
-    component : PypsaDevice
-        The PyPSA component to convert
-    pypsa_system : System
-        R2X system with PyPSA components
-    psy_system : System
-        R2X system with PowerSystems.jl components
-    """
-    return
-
 
 @pypsa_component_to_psy.register
 def _(
