@@ -364,10 +364,9 @@ def test_pypsa_sienna_objective_match(caplog):
     if pct_diff < 5.0:
         test_logger.info("✓ Objectives match within 5%!")
     elif pct_diff < 50.0:
-        test_logger.warning(f"⚠️  Objectives differ by {pct_diff:.2f}% - may be due to different cost formulations")
+        test_logger.warning(f"⚠️  Objectives differ by {pct_diff:.2f}%")
     else:
-        test_logger.warning(f"⚠️  Large difference ({pct_diff:.2f}%) - likely different objective formulations")
-        test_logger.warning("   PyPSA may include capital costs, while Sienna ED only includes operational costs")
+        test_logger.warning(f"⚠️  Large difference ({pct_diff:.2f}%)")
     test_logger.info("")
     
     # Don't assert - just report for now until we understand the difference

@@ -177,33 +177,91 @@ def plot_side_by_side_energy_balance(pypsa_df, sienna_df, carrier_colors, timest
     sienna_df_mapped = sienna_df.copy()
     sienna_df_mapped['carrier'] = sienna_df_mapped['carrier'].apply(map_sienna_to_pypsa_carrier)
     
-    # Pivot to get carriers as columns, time as index
-    pypsa_balance = pypsa_df.pivot_table(
+    # Identify load carriers (common names: 'load', 'AC', 'loads')
+    load_carriers = {'load', 'AC', 'loads', 'demand'}
+    
+    # Debug: log unique carriers to see what we have
+    logger.debug(f"PyPSA unique carriers: {sorted(pypsa_df['carrier'].unique())}")
+    logger.debug(f"Sienna unique carriers (after mapping): {sorted(sienna_df_mapped['carrier'].unique())}")
+    
+    # Separate load from generators for PyPSA
+    pypsa_load_mask = pypsa_df['carrier'].str.upper().isin([c.upper() for c in load_carriers])
+    pypsa_generators_df = pypsa_df[~pypsa_load_mask].copy()
+    pypsa_load_df = pypsa_df[pypsa_load_mask].copy()
+    
+    # Separate load from generators for Sienna
+    sienna_load_mask = sienna_df_mapped['carrier'].str.upper().isin([c.upper() for c in load_carriers])
+    sienna_generators_df = sienna_df_mapped[~sienna_load_mask].copy()
+    sienna_load_df = sienna_df_mapped[sienna_load_mask].copy()
+    
+    logger.debug(f"PyPSA load records: {len(pypsa_load_df)}, Sienna load records: {len(sienna_load_df)}")
+    
+    # Pivot to get carriers as columns, time as index (generators only)
+    pypsa_balance = pypsa_generators_df.pivot_table(
         index='DateTime',
         columns='carrier',
         values='value',
         aggfunc='sum'
     ).fillna(0)
     
-    sienna_balance = sienna_df_mapped.pivot_table(
+    sienna_balance = sienna_generators_df.pivot_table(
         index='DateTime',
         columns='carrier',
         values='value',
         aggfunc='sum'
     ).fillna(0)
+    
+    # Aggregate load data (sum all load carriers per timestep)
+    # Take absolute value since load might be stored as negative
+    if len(pypsa_load_df) > 0:
+        pypsa_load_total = pypsa_load_df.groupby('DateTime')['value'].sum().abs()
+        logger.debug(f"PyPSA load total: min={pypsa_load_total.min():.2f}, max={pypsa_load_total.max():.2f}, mean={pypsa_load_total.mean():.2f}")
+    else:
+        pypsa_load_total = pd.Series(dtype=float)
+    
+    if len(sienna_load_df) > 0:
+        sienna_load_total = sienna_load_df.groupby('DateTime')['value'].sum().abs()
+        logger.debug(f"Sienna load total: min={sienna_load_total.min():.2f}, max={sienna_load_total.max():.2f}, mean={sienna_load_total.mean():.2f}")
+    else:
+        sienna_load_total = pd.Series(dtype=float)
     
     # Limit to specified timesteps
     if timesteps is not None:
         pypsa_balance = pypsa_balance.iloc[:timesteps]
         sienna_balance = sienna_balance.iloc[:timesteps]
+        if len(pypsa_load_total) > 0:
+            pypsa_load_total = pypsa_load_total.iloc[:timesteps]
+        if len(sienna_load_total) > 0:
+            sienna_load_total = sienna_load_total.iloc[:timesteps]
     
-    # Separate positive and negative values
+    # Align load series with balance index (use intersection to preserve actual values)
+    if len(pypsa_load_total) > 0:
+        # Reindex to match balance index, but only fill missing values (not all zeros)
+        pypsa_load_total = pypsa_load_total.reindex(pypsa_balance.index)
+        # Fill NaN with 0 only for missing timesteps
+        pypsa_load_total = pypsa_load_total.fillna(0)
+        logger.debug(f"After alignment: PyPSA load has {len(pypsa_load_total)} points, {pypsa_load_total.abs().sum():.2f} total")
+    else:
+        pypsa_load_total = pd.Series(0, index=pypsa_balance.index)
+        logger.debug("PyPSA load is empty, creating zero series")
+    
+    if len(sienna_load_total) > 0:
+        # Reindex to match balance index, but only fill missing values (not all zeros)
+        sienna_load_total = sienna_load_total.reindex(sienna_balance.index)
+        # Fill NaN with 0 only for missing timesteps
+        sienna_load_total = sienna_load_total.fillna(0)
+        logger.debug(f"After alignment: Sienna load has {len(sienna_load_total)} points, {sienna_load_total.abs().sum():.2f} total")
+    else:
+        sienna_load_total = pd.Series(0, index=sienna_balance.index)
+        logger.debug("Sienna load is empty, creating zero series")
+    
+    # Separate positive and negative values (generators only)
     pypsa_pos = pypsa_balance.clip(lower=0)
     pypsa_neg = pypsa_balance.clip(upper=0)
     sienna_pos = sienna_balance.clip(lower=0)
     sienna_neg = sienna_balance.clip(upper=0)
     
-    # Get all unique carriers from both datasets
+    # Get all unique generator carriers from both datasets
     all_carriers = sorted(set(pypsa_balance.columns) | set(sienna_balance.columns))
     
     # Ensure both DataFrames have the same columns (fill missing with 0)
@@ -229,55 +287,139 @@ def plot_side_by_side_energy_balance(pypsa_df, sienna_df, carrier_colors, timest
     pypsa_colors = [carrier_colors.get(c, '#808080') for c in all_carriers]
     sienna_colors = [carrier_colors.get(c, '#808080') for c in all_carriers]
     
-    # Calculate y-axis limits (same for both plots)
+    # Calculate y-axis limits (include load in max calculation)
     ymin = min(pypsa_neg.sum(axis=1).min(), sienna_neg.sum(axis=1).min())
-    ymax = max(pypsa_pos.sum(axis=1).max(), sienna_pos.sum(axis=1).max())
+    ymax = max(
+        pypsa_pos.sum(axis=1).max(), 
+        sienna_pos.sum(axis=1).max(),
+        pypsa_load_total.abs().max() if len(pypsa_load_total) > 0 else 0,
+        sienna_load_total.abs().max() if len(sienna_load_total) > 0 else 0
+    )
+    # Add 5% padding to ensure load line is visible
+    ymax = ymax * 1.05
     
     # Create side-by-side plots
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 6))
     
     # PyPSA plot (left)
-    pypsa_pos.plot.area(
+    # Plot generators as stacked area
+    area1 = pypsa_pos.plot.area(
         ax=ax1,
         stacked=True,
         legend=False,
         color=pypsa_colors
     )
-    pypsa_neg.plot.area(
+    area2 = pypsa_neg.plot.area(
         ax=ax1,
         stacked=True,
         legend=False,
         color=pypsa_colors
     )
+    
+    # Plot load as dashed line at the top (absolute demand value)
+    # Plot AFTER area plots to ensure it's on top
+    if len(pypsa_load_total) > 0 and pypsa_load_total.abs().sum() > 0:
+        # Plot load line showing total demand (use absolute value to ensure positive)
+        load_values = pypsa_load_total.abs()
+        logger.debug(f"Plotting PyPSA load line: {len(load_values)} points, range [{load_values.min():.2f}, {load_values.max():.2f}]")
+        
+        # Ensure we have matching indices with the balance DataFrame
+        if not load_values.index.equals(pypsa_balance.index):
+            logger.warning(f"Load index doesn't match balance index. Reindexing...")
+            load_values = load_values.reindex(pypsa_balance.index, fill_value=0)
+        
+        # Use the same x-axis as the area plots by getting the x-axis data from the first area plot
+        # This ensures perfect alignment and avoids converter conflicts
+        x_data = pypsa_balance.index
+        y_data = load_values.values
+        
+        # Plot using explicit x positions (numeric indices) to avoid datetime converter issues
+        line = ax1.plot(
+            range(len(x_data)),
+            y_data,
+            color='red',
+            linestyle='--',
+            linewidth=4.0,
+            label='Load',
+            alpha=1.0,
+            zorder=1000,  # Extremely high zorder to ensure it's on top
+            marker='',  # No markers
+            markersize=0
+        )
+        logger.debug(f"Load line plotted with {len(load_values)} points, visible range: [{load_values.min():.2f}, {load_values.max():.2f}]")
+    
+    # Set y-axis limits AFTER plotting everything
     ax1.set_ylim(ymin, ymax)
+    
     ax1.set_title("PyPSA Energy Balance", fontsize=14, fontweight='bold')
     ax1.set_ylabel("Supply (MW)", fontsize=12)
     ax1.set_xlabel("Time", fontsize=12)
     ax1.grid(True, alpha=0.3)
     
     # Sienna plot (right)
-    sienna_pos.plot.area(
+    # Plot generators as stacked area
+    area1 = sienna_pos.plot.area(
         ax=ax2,
         stacked=True,
         legend=False,
         color=sienna_colors
     )
-    sienna_neg.plot.area(
+    area2 = sienna_neg.plot.area(
         ax=ax2,
         stacked=True,
         legend=False,
         color=sienna_colors
     )
+    
+    # Plot load as dashed line at the top (absolute demand value)
+    # Plot AFTER area plots to ensure it's on top
+    if len(sienna_load_total) > 0 and sienna_load_total.abs().sum() > 0:
+        # Plot load line showing total demand (use absolute value to ensure positive)
+        load_values = sienna_load_total.abs()
+        logger.debug(f"Plotting Sienna load line: {len(load_values)} points, range [{load_values.min():.2f}, {load_values.max():.2f}]")
+        
+        # Ensure we have matching indices with the balance DataFrame
+        if not load_values.index.equals(sienna_balance.index):
+            logger.warning(f"Load index doesn't match balance index. Reindexing...")
+            load_values = load_values.reindex(sienna_balance.index, fill_value=0)
+        
+        # Use the same x-axis as the area plots by getting the x-axis data from the first area plot
+        # This ensures perfect alignment and avoids converter conflicts
+        x_data = sienna_balance.index
+        y_data = load_values.values
+        
+        # Plot using explicit x positions (numeric indices) to avoid datetime converter issues
+        line = ax2.plot(
+            range(len(x_data)),
+            y_data,
+            color='red',
+            linestyle='--',
+            linewidth=4.0,
+            label='Load',
+            alpha=1.0,
+            zorder=1000,  # Extremely high zorder to ensure it's on top
+            marker='',  # No markers
+            markersize=0
+        )
+        logger.debug(f"Load line plotted with {len(load_values)} points, visible range: [{load_values.min():.2f}, {load_values.max():.2f}]")
+    
+    # Set y-axis limits AFTER plotting everything
     ax2.set_ylim(ymin, ymax)
+    
     ax2.set_title("Sienna Energy Balance", fontsize=14, fontweight='bold')
     ax2.set_ylabel("Supply (MW)", fontsize=12)
     ax2.set_xlabel("Time", fontsize=12)
     ax2.grid(True, alpha=0.3)
     
-    # Create shared legend
+    # Create shared legend (generators + load)
     import matplotlib.patches as mpatches
+    import matplotlib.lines as mlines
     handles = [mpatches.Patch(color=carrier_colors.get(c, '#808080'), label=c) for c in all_carriers]
-    fig.legend(handles, all_carriers, bbox_to_anchor=(0.5, -0.05), loc='lower center', ncol=min(len(all_carriers), 8))
+    # Add load line to legend
+    load_handle = mlines.Line2D([], [], color='red', linestyle='--', linewidth=2, label='Load')
+    handles.append(load_handle)
+    legend_labels = all_carriers + ['Load']
+    fig.legend(handles, legend_labels, bbox_to_anchor=(0.5, -0.05), loc='lower center', ncol=min(len(legend_labels), 8))
     
     plt.tight_layout()
     
@@ -689,19 +831,19 @@ def main():
     else:
         plt.close()
     
-    # Create marginal costs plot
-    logger.info("Creating marginal costs comparison plot...")
-    marginal_costs_file = output_dir / "dispatch_comparison_marginal_costs.png"
-    plot_marginal_costs_comparison(
-        args.network_file,
-        args.sienna_json,
-        carrier_colors,
-        output_file=str(marginal_costs_file)
-    )
-    if not args.no_show:
-        plt.show()
-    else:
-        plt.close()
+    # # Create marginal costs plot
+    # logger.info("Creating marginal costs comparison plot...")
+    # marginal_costs_file = output_dir / "dispatch_comparison_marginal_costs.png"
+    # plot_marginal_costs_comparison(
+    #     args.network_file,
+    #     args.sienna_json,
+    #     carrier_colors,
+    #     output_file=str(marginal_costs_file)
+    # )
+    # if not args.no_show:
+    #     plt.show()
+    # else:
+    #     plt.close()
     
     logger.info("Comparison complete!")
 
