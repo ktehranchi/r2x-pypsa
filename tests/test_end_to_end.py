@@ -576,7 +576,10 @@ def test_compare_pypsa_sienna_systems():
     logger.info(f"Total max load (sum of static max_active_power): {sienna_total_load_static:.2f} MW")
     logger.info(f"Max load (peak static): {sienna_max_load_static:.2f} MW")
 
-    # Check time series from HDF5
+    # Check time series from HDF5 and extract for comparison
+    sienna_loads_with_ts = 0
+    sienna_total_load_ts = None  # Will be a pandas Series with total load at each timestep
+    
     if h5_file.exists():
         with h5py.File(h5_file, 'r') as h5:
             if 'time_series_metadata' in h5:
@@ -596,7 +599,7 @@ def test_compare_pypsa_sienna_systems():
                 # Use the correct table name (could be time_series_metadata or time_series_associations)
                 table_name = 'time_series_metadata' if 'time_series_metadata' in tables else 'time_series_associations'
 
-                # Count load time series
+                # Count load time series and extract time series data
                 load_uuids = [load.get('internal', {}).get('uuid', {}).get('value') for load in sienna_loads]
 
                 if load_uuids:
@@ -604,15 +607,164 @@ def test_compare_pypsa_sienna_systems():
                     query = f'''
                         SELECT COUNT(DISTINCT owner_uuid)
                         FROM {table_name}
-                        WHERE owner_uuid IN ({placeholders}) AND owner_type = 'PowerLoad' AND name = 'active_power'
+                        WHERE owner_uuid IN ({placeholders}) AND owner_type = 'PowerLoad' AND name = 'max_active_power'
                     '''
                     cursor.execute(query, load_uuids)
                     sienna_loads_with_ts = cursor.fetchone()[0]
+                    
+                    # Extract time series for each load
+                    if sienna_loads_with_ts > 0:
+                        # Query to get time series UUIDs and metadata for all loads
+                        query = f'''
+                            SELECT owner_uuid, time_series_uuid, initial_timestamp, resolution, length
+                            FROM {table_name}
+                            WHERE owner_uuid IN ({placeholders}) AND owner_type = 'PowerLoad' AND name = 'max_active_power'
+                        '''
+                        cursor.execute(query, load_uuids)
+                        ts_metadata = cursor.fetchall()
+                        
+                        # Store load time series (per-load, will sum later)
+                        load_time_series = {}  # {load_uuid: pd.Series}
+                        
+                        for load_uuid, ts_uuid, initial_timestamp, resolution, length in ts_metadata:
+                            # Read time series data from HDF5
+                            possible_paths = [
+                                f"/time_series/{ts_uuid}/data",
+                                f"/time_series/{ts_uuid}",
+                                f"/{ts_uuid}/data",
+                            ]
+                            
+                            ts_data = None
+                            for path in possible_paths:
+                                if path in h5:
+                                    if isinstance(h5[path], h5py.Dataset):
+                                        ts_data = h5[path][:]
+                                        break
+                                    elif isinstance(h5[path], h5py.Group) and 'data' in h5[path]:
+                                        ts_data = h5[path]['data'][:]
+                                        break
+                            
+                            # If not found, search in time_series group
+                            if ts_data is None and 'time_series' in h5:
+                                for key in h5['time_series'].keys():
+                                    if ts_uuid in key or key == ts_uuid:
+                                        ts_group = h5['time_series'][key]
+                                        if 'data' in ts_group:
+                                            ts_data = ts_group['data'][:]
+                                            break
+                                        elif isinstance(ts_group, h5py.Dataset):
+                                            ts_data = ts_group[:]
+                                            break
+                            
+                            if ts_data is not None:
+                                # Create time index
+                                initial_ts = pd.Timestamp(initial_timestamp)
+                                
+                                # Parse resolution
+                                resolution_str = str(resolution)
+                                if 'PT' in resolution_str:
+                                    resolution_str = resolution_str.replace('PT', '')
+                                    if 'H' in resolution_str:
+                                        hours = int(resolution_str.replace('H', ''))
+                                        freq = f"{hours}h"
+                                    elif 'M' in resolution_str:
+                                        minutes = int(resolution_str.replace('M', ''))
+                                        freq = f"{minutes}min"
+                                    else:
+                                        freq = "1h"
+                                else:
+                                    freq = "1h"
+                                
+                                # Create time index
+                                time_index = pd.date_range(start=initial_ts, periods=len(ts_data), freq=freq)
+                                
+                                # Get load info to convert from per-unit to MW
+                                load_info = next((l for l in sienna_loads if l.get('internal', {}).get('uuid', {}).get('value') == load_uuid), None)
+                                if load_info:
+                                    base_power = load_info.get('base_power', 100.0)
+                                    max_active_power_pu = load_info.get('max_active_power', 0.0)
+                                    max_active_power_mw = max_active_power_pu * base_power
+                                    
+                                    # Convert from per-unit to MW: ts_pu * max_active_power_mw
+                                    ts_mw = pd.Series(ts_data * max_active_power_mw, index=time_index)
+                                    load_time_series[load_uuid] = ts_mw
+                        
+                        # Sum all load time series to get total load at each timestep
+                        if load_time_series:
+                            # Align all series to common time index (use union of all indices)
+                            all_indices = set()
+                            for ts in load_time_series.values():
+                                all_indices.update(ts.index)
+                            common_index = pd.DatetimeIndex(sorted(all_indices))
+                            
+                            # Reindex and sum
+                            total_load_series = pd.Series(0.0, index=common_index)
+                            for ts in load_time_series.values():
+                                ts_aligned = ts.reindex(common_index, fill_value=0.0)
+                                total_load_series += ts_aligned
+                            
+                            sienna_total_load_ts = total_load_series
 
                 conn.close()
                 db_path.unlink()
 
     logger.info(f"Loads with time series: {sienna_loads_with_ts}")
+    
+    # ===== LOAD TIME SERIES COMPARISON =====
+    load_ts_match_count = 0
+    load_ts_total_count = 0
+    load_ts_max_diff = 0.0
+    load_ts_mean_diff = 0.0
+    
+    if hasattr(network.loads_t, 'p_set') and len(network.loads_t.p_set) > 0 and sienna_total_load_ts is not None:
+        # Extract PyPSA total load time series (sum across all loads)
+        # PyPSA loads are negative (consumption), so take absolute value for comparison
+        pypsa_total_load_ts = network.loads_t.p_set.sum(axis=1).abs()
+        
+        # Align by index position instead of timestamps (handles T vs space format differences)
+        # Use the minimum length to ensure both have data
+        min_length = min(len(pypsa_total_load_ts), len(sienna_total_load_ts))
+        
+        if min_length > 0:
+            # Extract values by position (ignore timestamp format differences)
+            pypsa_values = pypsa_total_load_ts.values[:min_length]
+            sienna_values = sienna_total_load_ts.values[:min_length]
+            
+            # Compare at least 20 timesteps (or all available if fewer)
+            num_timesteps_to_check = min_length
+            if num_timesteps_to_check < 20:
+                logger.warning(f"Only {num_timesteps_to_check} timesteps available (less than 20 requested)")
+            
+            differences = []
+            matches = 0
+            
+            for i in range(num_timesteps_to_check):
+                pypsa_val = pypsa_values[i]
+                sienna_val = sienna_values[i]
+                diff = abs(pypsa_val - sienna_val)
+                differences.append(diff)
+                
+                if diff <= 0.01:  # 0.01 MW tolerance
+                    matches += 1
+                else:
+                    # Get timestamp for logging (use PyPSA index if available)
+                    ts_str = str(pypsa_total_load_ts.index[i]) if i < len(pypsa_total_load_ts.index) else f"index_{i}"
+                    logger.debug(f"Load TS mismatch at {ts_str}: PyPSA={pypsa_val:.4f} MW, Sienna={sienna_val:.4f} MW, diff={diff:.4f} MW")
+            
+            load_ts_match_count = matches
+            load_ts_total_count = num_timesteps_to_check
+            load_ts_max_diff = max(differences) if differences else 0.0
+            load_ts_mean_diff = sum(differences) / len(differences) if differences else 0.0
+            
+            logger.info(f"Load time series comparison: {matches}/{num_timesteps_to_check} timesteps match (tolerance: 0.01 MW)")
+            logger.info(f"  Max difference: {load_ts_max_diff:.4f} MW")
+            logger.info(f"  Mean difference: {load_ts_mean_diff:.4f} MW")
+        else:
+            logger.warning("No timesteps available for load time series comparison")
+    elif sienna_total_load_ts is None:
+        logger.info("Sienna load time series not available for comparison")
+    else:
+        logger.info("PyPSA load time series not available for comparison")
 
     # Generation
     # For generators, active_power_limits.max is in per-unit (relative to base_power)
@@ -691,6 +843,7 @@ def test_compare_pypsa_sienna_systems():
             'Total Max Load (MW)',
             'Peak Load (MW)',
             'Loads with Time Series',
+            'Load Time Series Match',
             'Total Generators (p_nom > 0)',
             'Thermal Generators',
             'Thermal Capacity (MW)',
@@ -708,6 +861,7 @@ def test_compare_pypsa_sienna_systems():
             f"{pypsa_total_max_load:.2f}",
             f"{pypsa_max_load:.2f}",
             "N/A",  # PyPSA always has time series for loads
+            f"{load_ts_total_count} timesteps checked" if load_ts_total_count > 0 else "N/A",
             len(pypsa_generators),
             len(pypsa_thermal),
             f"{pypsa_thermal_capacity:.2f}",
@@ -725,6 +879,7 @@ def test_compare_pypsa_sienna_systems():
             f"{sienna_total_load_static:.2f}",
             f"{sienna_max_load_static:.2f}",
             sienna_loads_with_ts,
+            f"{load_ts_match_count}/{load_ts_total_count} match" if load_ts_total_count > 0 else "N/A",
             len(sienna_thermal) + len(sienna_renewable),  # Total = thermal + renewable (hydro already included in renewable)
             len(sienna_thermal),
             f"{sienna_thermal_capacity:.2f}",
