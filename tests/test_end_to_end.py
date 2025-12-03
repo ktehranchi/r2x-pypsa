@@ -20,6 +20,11 @@ from helpers import (
     plot_capacity_comparison,
     plot_sienna_energy_balance
 )
+from test_time_series_helpers import (
+    extract_pypsa_generator_time_series,
+    extract_sienna_generator_time_series,
+    compare_time_series
+)
 
 
 def test_end_to_end_pypsa_to_psy_conversion():
@@ -766,6 +771,101 @@ def test_compare_pypsa_sienna_systems():
     else:
         logger.info("PyPSA load time series not available for comparison")
 
+    # ===== RENEWABLE GENERATION TIME SERIES COMPARISON =====
+    logger.info("=" * 80)
+    logger.info("RENEWABLE GENERATION TIME SERIES COMPARISON")
+    logger.info("=" * 80)
+    
+    # Define generator type mappings
+    generator_mappings = {
+        'solar': {
+            'pypsa_carriers': ['solar'],
+            'sienna_prime_movers': ['PVe'],
+            'name': 'Solar'
+        },
+        'wind': {
+            'pypsa_carriers': ['onwind', 'offwind', 'offwind_floating', 'wind'],
+            'sienna_prime_movers': ['WT', 'WS'],
+            'name': 'Wind'
+        },
+        'hydro': {
+            'pypsa_carriers': ['hydro', 'ror'],
+            'sienna_prime_movers': ['HY'],
+            'name': 'Hydro'
+        }
+    }
+    
+    # Store results for each generator type
+    renewable_ts_results = {}
+    
+    for gen_type, mapping in generator_mappings.items():
+        logger.info(f"\n--- {mapping['name']} Generation Time Series ---")
+        
+        # Extract PyPSA time series
+        pypsa_ts, pypsa_count, pypsa_capacity = extract_pypsa_generator_time_series(
+            network,
+            mapping['pypsa_carriers'],
+            generator_filter=lambda df: df.p_nom > 0
+        )
+        
+        logger.info(f"PyPSA {mapping['name'].lower()} generators: {pypsa_count}")
+        if pypsa_capacity > 0:
+            logger.info(f"  Total {mapping['name'].lower()} capacity: {pypsa_capacity:.2f} MW")
+        if pypsa_ts is not None:
+            logger.info(f"  Time series length: {len(pypsa_ts)}")
+        elif pypsa_count > 0:
+            logger.info(f"  No time series data available")
+        
+        # Extract Sienna time series
+        sienna_ts, sienna_count, sienna_capacity, sienna_with_ts = extract_sienna_generator_time_series(
+            json_file,
+            h5_file,
+            mapping['sienna_prime_movers'],
+            output_dir,
+            component_type='RenewableDispatch'
+        )
+        
+        logger.info(f"Sienna {mapping['name'].lower()} generators: {sienna_count}")
+        if sienna_capacity > 0:
+            logger.info(f"  Total {mapping['name'].lower()} capacity: {sienna_capacity:.2f} MW")
+        if sienna_with_ts > 0:
+            logger.info(f"  Generators with time series: {sienna_with_ts}")
+        if sienna_ts is not None:
+            logger.info(f"  Time series length: {len(sienna_ts)}")
+        elif sienna_count > 0:
+            logger.info(f"  No time series data available")
+        
+        # Compare time series
+        match, match_count, total_count, max_diff, mean_diff = compare_time_series(
+            pypsa_ts,
+            sienna_ts,
+            tolerance_mw=0.01,
+            min_timesteps=20,
+            name=f"{mapping['name']} TS"
+        )
+        
+        # Note: compare_time_series already logs detailed comparison results
+        if total_count == 0:
+            if pypsa_ts is None:
+                logger.info(f"PyPSA {mapping['name'].lower()} time series not available for comparison")
+            elif sienna_ts is None:
+                logger.info(f"Sienna {mapping['name'].lower()} time series not available for comparison")
+        
+        # Store results
+        renewable_ts_results[gen_type] = {
+            'pypsa_count': pypsa_count,
+            'pypsa_capacity': pypsa_capacity,
+            'sienna_count': sienna_count,
+            'sienna_capacity': sienna_capacity,
+            'sienna_with_ts': sienna_with_ts,
+            'match': match,
+            'match_count': match_count,
+            'total_count': total_count,
+            'max_diff': max_diff,
+            'mean_diff': mean_diff,
+            'name': mapping['name']
+        }
+
     # Generation
     # For generators, active_power_limits.max is in per-unit (relative to base_power)
     # Actual capacity = base_power * active_power_limits.max
@@ -837,61 +937,91 @@ def test_compare_pypsa_sienna_systems():
     logger.info("COMPARISON TABLE")
     logger.info("=" * 80)
 
+    # Build comparison table
+    metrics = [
+        'Load Count',
+        'Total Max Load (MW)',
+        'Peak Load (MW)',
+        'Loads with Time Series',
+        'Load Time Series Match',
+    ]
+    pypsa_values = [
+        pypsa_load_count,
+        f"{pypsa_total_max_load:.2f}",
+        f"{pypsa_max_load:.2f}",
+        "N/A",  # PyPSA always has time series for loads
+        f"{load_ts_total_count} timesteps checked" if load_ts_total_count > 0 else "N/A",
+    ]
+    sienna_values = [
+        len(sienna_loads),
+        f"{sienna_total_load_static:.2f}",
+        f"{sienna_max_load_static:.2f}",
+        sienna_loads_with_ts,
+        f"{load_ts_match_count}/{load_ts_total_count} match" if load_ts_total_count > 0 else "N/A",
+    ]
+    
+    # Add renewable generator time series comparisons
+    for gen_type in ['solar', 'wind', 'hydro']:
+        if gen_type in renewable_ts_results:
+            result = renewable_ts_results[gen_type]
+            metrics.extend([
+                f'{result["name"]} Generators',
+                f'{result["name"]} Capacity Factor Time Series Match',
+            ])
+            pypsa_values.extend([
+                result['pypsa_count'],
+                f"{result['total_count']} timesteps checked" if result['total_count'] > 0 else "N/A",
+            ])
+            sienna_values.extend([
+                result['sienna_count'],
+                f"{result['match_count']}/{result['total_count']} match" if result['total_count'] > 0 else "N/A",
+            ])
+    
+    # Add remaining metrics
+    metrics.extend([
+        'Total Generators (p_nom > 0)',
+        'Thermal Generators',
+        'Thermal Capacity (MW)',
+        'Renewable Generators (RenewableDispatch)',
+        'Renewable Capacity (MW)',
+        'Hydro Generators (HydroDispatch)',
+        'Hydro Capacity (MW)',
+        'Total Generation Capacity (MW)',
+        'Storage Units',
+        'Storage Capacity (MW)',
+        'Buses',
+    ])
+    pypsa_values.extend([
+        len(pypsa_generators),
+        len(pypsa_thermal),
+        f"{pypsa_thermal_capacity:.2f}",
+        len(pypsa_renewable),
+        f"{pypsa_renewable_capacity:.2f}",
+        len(pypsa_hydro),
+        f"{pypsa_hydro.p_nom.sum() if len(pypsa_hydro) > 0 else 0.0:.2f}",
+        f"{pypsa_total_capacity:.2f}",
+        len(network.storage_units) if hasattr(network, 'storage_units') else 0,
+        f"{pypsa_storage_capacity:.2f}",
+        len(network.buses),
+    ])
+    sienna_values.extend([
+        len(sienna_thermal) + len(sienna_renewable),  # Total = thermal + renewable (hydro already included in renewable)
+        len(sienna_thermal),
+        f"{sienna_thermal_capacity:.2f}",
+        len(sienna_renewable),
+        f"{sienna_renewable_capacity:.2f}",
+        len(sienna_hydro),
+        f"{sienna_hydro_capacity:.2f}",
+        f"{sienna_total_capacity:.2f}",
+        len(sienna_storage),
+        f"{sienna_storage_capacity:.2f}",
+        len(sienna_buses),
+    ])
+    
     comparison_data = {
-        'Metric': [
-            'Load Count',
-            'Total Max Load (MW)',
-            'Peak Load (MW)',
-            'Loads with Time Series',
-            'Load Time Series Match',
-            'Total Generators (p_nom > 0)',
-            'Thermal Generators',
-            'Thermal Capacity (MW)',
-            'Renewable Generators (RenewableDispatch)',
-            'Renewable Capacity (MW)',
-            'Hydro Generators (HydroDispatch)',
-            'Hydro Capacity (MW)',
-            'Total Generation Capacity (MW)',
-            'Storage Units',
-            'Storage Capacity (MW)',
-            'Buses',
-        ],
-        'PyPSA': [
-            pypsa_load_count,
-            f"{pypsa_total_max_load:.2f}",
-            f"{pypsa_max_load:.2f}",
-            "N/A",  # PyPSA always has time series for loads
-            f"{load_ts_total_count} timesteps checked" if load_ts_total_count > 0 else "N/A",
-            len(pypsa_generators),
-            len(pypsa_thermal),
-            f"{pypsa_thermal_capacity:.2f}",
-            len(pypsa_renewable),
-            f"{pypsa_renewable_capacity:.2f}",
-            len(pypsa_hydro),
-            f"{pypsa_hydro.p_nom.sum() if len(pypsa_hydro) > 0 else 0.0:.2f}",
-            f"{pypsa_total_capacity:.2f}",
-            len(network.storage_units) if hasattr(network, 'storage_units') else 0,
-            f"{pypsa_storage_capacity:.2f}",
-            len(network.buses),
-        ],
-        'Sienna': [
-            len(sienna_loads),
-            f"{sienna_total_load_static:.2f}",
-            f"{sienna_max_load_static:.2f}",
-            sienna_loads_with_ts,
-            f"{load_ts_match_count}/{load_ts_total_count} match" if load_ts_total_count > 0 else "N/A",
-            len(sienna_thermal) + len(sienna_renewable),  # Total = thermal + renewable (hydro already included in renewable)
-            len(sienna_thermal),
-            f"{sienna_thermal_capacity:.2f}",
-            len(sienna_renewable),
-            f"{sienna_renewable_capacity:.2f}",
-            len(sienna_hydro),
-            f"{sienna_hydro_capacity:.2f}",
-            f"{sienna_total_capacity:.2f}",
-            len(sienna_storage),
-            f"{sienna_storage_capacity:.2f}",
-            len(sienna_buses),
-        ],
+        'Metric': metrics,
+        'PyPSA': pypsa_values,
+        'Sienna': sienna_values,
     }
 
     df = pd.DataFrame(comparison_data)
@@ -915,6 +1045,121 @@ def test_compare_pypsa_sienna_systems():
         logger.info(f"Total Capacity Difference: {capacity_diff:.2f} MW ({capacity_pct_diff:.2f}%)")
     except Exception:
         pass
+    
+    # Log renewable time series differences
+    for gen_type in ['solar', 'wind', 'hydro']:
+        if gen_type in renewable_ts_results:
+            result = renewable_ts_results[gen_type]
+            if result['total_count'] > 0:
+                if result['match']:
+                    logger.info(f"{result['name']} Time Series Match: {result['match_count']}/{result['total_count']} timesteps match (tolerance: 0.01 MW)")
+                    logger.info(f"  Max difference: {result['max_diff']:.4f} MW")
+                    logger.info(f"  Mean difference: {result['mean_diff']:.4f} MW")
+                else:
+                    logger.error(f"{result['name']} Time Series Mismatch: {result['match_count']}/{result['total_count']} timesteps match (tolerance: 0.01 MW)")
+                    logger.error(f"  Max difference: {result['max_diff']:.4f} MW")
+                    logger.error(f"  Mean difference: {result['mean_diff']:.4f} MW")
+
+    # ===== MARGINAL PRICE COMPARISON =====
+    logger.info("=" * 80)
+    logger.info("MARGINAL PRICE COMPARISON")
+    logger.info("=" * 80)
+    
+    # Extract PyPSA marginal costs
+    pypsa_marginal_costs = {}
+    for gen_name in pypsa_generators.index:
+        mc = network.generators.loc[gen_name, 'marginal_cost']
+        # Handle time-varying marginal costs (use mean)
+        if isinstance(mc, pd.Series):
+            mc_value = float(mc.mean())
+        else:
+            # Handle NaN or None values
+            try:
+                mc_value = float(mc) if mc is not None and not (isinstance(mc, float) and pd.isna(mc)) else 0.0
+            except (ValueError, TypeError):
+                mc_value = 0.0
+        pypsa_marginal_costs[gen_name] = mc_value
+    
+    # Extract Sienna marginal costs from JSON
+    sienna_marginal_costs = {}
+    sienna_generators_all = sienna_thermal + sienna_renewable
+    
+    for gen in sienna_generators_all:
+        gen_name = gen.get('name', '')
+        if not gen_name:
+            continue
+        
+        mc = 0.0
+        op_cost = gen.get('operation_cost')
+        if op_cost:
+            variable = op_cost.get('variable')
+            if variable:
+                value_curve = variable.get('value_curve')
+                if value_curve:
+                    # Try to get proportional_term from LinearCurve
+                    if 'proportional_term' in value_curve:
+                        mc = float(value_curve['proportional_term'])
+                    elif 'function_data' in value_curve:
+                        func_data = value_curve['function_data']
+                        if isinstance(func_data, dict) and 'proportional_term' in func_data:
+                            mc = float(func_data['proportional_term'])
+        
+        sienna_marginal_costs[gen_name] = mc
+    
+    # Compare marginal costs
+    tolerance = 0.01  # USD/MWh
+    
+    total_compared = 0
+    matching_costs = 0
+    different_costs = 0
+    no_cost_pypsa = 0  # Missing or 0.0 in PyPSA
+    no_cost_sienna = 0  # Missing or 0.0 in Sienna
+    cost_pypsa_missing_sienna = 0  # Has cost in PyPSA but missing in Sienna
+    cost_sienna_missing_pypsa = 0  # Has cost in Sienna but missing in PyPSA
+    
+    # Get all unique generator names
+    all_gen_names = set(pypsa_marginal_costs.keys()) | set(sienna_marginal_costs.keys())
+    
+    for gen_name in all_gen_names:
+        pypsa_mc = pypsa_marginal_costs.get(gen_name)
+        sienna_mc = sienna_marginal_costs.get(gen_name)
+        
+        # Check if generator exists in both systems
+        if gen_name in pypsa_marginal_costs and gen_name in sienna_marginal_costs:
+            total_compared += 1
+            pypsa_val = pypsa_mc
+            sienna_val = sienna_mc
+            
+            # Check if costs match (within tolerance)
+            if abs(pypsa_val - sienna_val) <= tolerance:
+                matching_costs += 1
+            else:
+                different_costs += 1
+            
+            # Track no-cost cases (0.0 or missing)
+            if pypsa_val == 0.0:
+                no_cost_pypsa += 1
+            if sienna_val == 0.0:
+                no_cost_sienna += 1
+        elif gen_name in pypsa_marginal_costs:
+            # Generator only in PyPSA
+            pypsa_val = pypsa_mc
+            if pypsa_val != 0.0:
+                cost_pypsa_missing_sienna += 1
+        elif gen_name in sienna_marginal_costs:
+            # Generator only in Sienna
+            sienna_val = sienna_mc
+            if sienna_val != 0.0:
+                cost_sienna_missing_pypsa += 1
+    
+    # Log summary statistics
+    logger.info(f"Total generators compared: {total_compared}")
+    logger.info(f"Generators with matching costs (tolerance: {tolerance} USD/MWh): {matching_costs}")
+    logger.info(f"Generators with different costs: {different_costs}")
+    logger.info(f"Generators with no cost in PyPSA (missing or 0.0): {no_cost_pypsa}")
+    logger.info(f"Generators with no cost in Sienna (missing or 0.0): {no_cost_sienna}")
+    logger.info(f"Generators with cost in PyPSA but missing in Sienna: {cost_pypsa_missing_sienna}")
+    logger.info(f"Generators with cost in Sienna but missing in PyPSA: {cost_sienna_missing_pypsa}")
 
     logger.info("=" * 80)
 

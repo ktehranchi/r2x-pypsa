@@ -63,7 +63,7 @@ def get_carrier_colors(network_file):
         'offwind': '#88D8C0',
         'solar': '#FFD93D',
         'battery': '#6C5CE7',
-        'other': '#808080',
+        'other': '#9B59B6',  # Purple to distinguish from coal (black)
     }
     
     try:
@@ -121,6 +121,60 @@ def get_carrier_colors(network_file):
         return default_colors.copy()
 
 
+def map_pypsa_to_fuel_carrier(pypsa_carrier):
+    """Map PyPSA technology-specific carriers to fuel-based names for consistency.
+    
+    PyPSA uses technology-specific carriers like "CCGT" and "OCGT", while Sienna
+    uses fuel types like "NATURAL_GAS". This function normalizes PyPSA carriers to
+    fuel-based names to match Sienna output and the default color scheme.
+    
+    Parameters:
+        pypsa_carrier: PyPSA carrier name (e.g., "CCGT", "OCGT", "coal", "solar")
+        
+    Returns:
+        str: Fuel-based carrier name (e.g., "gas", "coal", "solar")
+    """
+    mapping = {
+        # Thermal generators - map technology to fuel
+        "CCGT": "gas",
+        "OCGT": "gas",
+        "CCGT-95CCS": "gas",
+        "coal": "coal",
+        "gas": "gas",
+        "nuclear": "nuclear",
+        "oil": "oil",
+        "biomass": "biomass",
+        "waste": "waste",
+        "geothermal": "geothermal",
+        "hydrogen_ct": "other",
+        "other": "other",
+        # Renewables - keep as-is (already match color scheme)
+        "solar": "solar",
+        "onwind": "onwind",
+        "offwind": "offwind",
+        "offwind_floating": "offwind",
+        "wind": "onwind",  # Alias for onwind
+        "hydro": "hydro",
+        "ror": "hydro",  # Run-of-river hydro
+        # Storage
+        "battery": "battery",
+        "pumped_hydro": "pumped_hydro",
+    }
+    
+    # Try direct mapping first
+    if pypsa_carrier in mapping:
+        return mapping[pypsa_carrier]
+    
+    # Try case-insensitive match
+    pypsa_lower = pypsa_carrier.lower()
+    for key, value in mapping.items():
+        if key.lower() == pypsa_lower:
+            return value
+    
+    # If no mapping found, return original (will use default color if available)
+    return pypsa_carrier
+
+
 def map_sienna_to_pypsa_carrier(sienna_carrier):
     """Map Sienna carrier names (prime mover types/fuel types) to PyPSA carrier names.
     
@@ -173,21 +227,54 @@ def plot_side_by_side_energy_balance(pypsa_df, sienna_df, carrier_colors, timest
         timesteps: Number of timesteps to plot (default: 168 for 1 week)
         output_file: Optional path to save the plot
     """
-    # Map Sienna carrier names to PyPSA carrier names for consistency
+    # Map PyPSA carriers to fuel-based names for consistency
+    pypsa_df_mapped = pypsa_df.copy()
+    pypsa_df_mapped['carrier'] = pypsa_df_mapped['carrier'].apply(map_pypsa_to_fuel_carrier)
+    
+    # Map Sienna carrier names to fuel-based names for consistency
     sienna_df_mapped = sienna_df.copy()
     sienna_df_mapped['carrier'] = sienna_df_mapped['carrier'].apply(map_sienna_to_pypsa_carrier)
+    
+    # Debug: Compare wind values for first timestep to investigate discrepancy
+    try:
+        first_ts_pypsa = pd.Timestamp('2030-01-01 00:00:00')
+        first_ts_sienna = pd.Timestamp('2030-01-01T00:00:00.0')
+        
+        # Try both timestamp formats
+        pypsa_wind_first = pypsa_df[(pypsa_df['DateTime'] == first_ts_pypsa) & 
+                                     (pypsa_df['carrier'].isin(['onwind', 'offwind']))]['value'].sum()
+        if pypsa_wind_first == 0:
+            # Try alternative timestamp format
+            pypsa_wind_first = pypsa_df[(pypsa_df['DateTime'].dt.normalize() == first_ts_pypsa.normalize()) & 
+                                         (pypsa_df['carrier'].isin(['onwind', 'offwind']))]['value'].sum()
+        
+        sienna_wind_first = sienna_df[(sienna_df['DateTime'] == first_ts_sienna) & 
+                                       (sienna_df['carrier'] == 'WT')]['value'].sum()
+        if sienna_wind_first == 0:
+            # Try alternative timestamp format
+            sienna_wind_first = sienna_df[(sienna_df['DateTime'].dt.normalize() == first_ts_sienna.normalize()) & 
+                                          (sienna_df['carrier'] == 'WT')]['value'].sum()
+        
+        logger.info(f"First timestep wind comparison - PyPSA: {pypsa_wind_first:.2f} MW, Sienna: {sienna_wind_first:.2f} MW")
+        
+        # Count wind generators
+        pypsa_wind_gens = pypsa_df[pypsa_df['carrier'].isin(['onwind', 'offwind'])]['name'].nunique()
+        sienna_wind_gens = sienna_df[sienna_df['carrier'] == 'WT']['name'].nunique()
+        logger.info(f"Wind generator count - PyPSA: {pypsa_wind_gens}, Sienna: {sienna_wind_gens}")
+    except Exception as e:
+        logger.warning(f"Could not compare wind values: {e}")
     
     # Identify load carriers (common names: 'load', 'AC', 'loads')
     load_carriers = {'load', 'AC', 'loads', 'demand'}
     
     # Debug: log unique carriers to see what we have
-    logger.debug(f"PyPSA unique carriers: {sorted(pypsa_df['carrier'].unique())}")
+    logger.debug(f"PyPSA unique carriers (after mapping): {sorted(pypsa_df_mapped['carrier'].unique())}")
     logger.debug(f"Sienna unique carriers (after mapping): {sorted(sienna_df_mapped['carrier'].unique())}")
     
     # Separate load from generators for PyPSA
-    pypsa_load_mask = pypsa_df['carrier'].str.upper().isin([c.upper() for c in load_carriers])
-    pypsa_generators_df = pypsa_df[~pypsa_load_mask].copy()
-    pypsa_load_df = pypsa_df[pypsa_load_mask].copy()
+    pypsa_load_mask = pypsa_df_mapped['carrier'].str.upper().isin([c.upper() for c in load_carriers])
+    pypsa_generators_df = pypsa_df_mapped[~pypsa_load_mask].copy()
+    pypsa_load_df = pypsa_df_mapped[pypsa_load_mask].copy()
     
     # Separate load from generators for Sienna
     sienna_load_mask = sienna_df_mapped['carrier'].str.upper().isin([c.upper() for c in load_carriers])
@@ -283,9 +370,44 @@ def plot_side_by_side_energy_balance(pypsa_df, sienna_df, carrier_colors, timest
     sienna_pos = sienna_pos[all_carriers]
     sienna_neg = sienna_neg[all_carriers]
     
-    # Get colors for carriers (use PyPSA colors, fallback to default if missing)
-    pypsa_colors = [carrier_colors.get(c, '#808080') for c in all_carriers]
-    sienna_colors = [carrier_colors.get(c, '#808080') for c in all_carriers]
+    # Map carrier colors from original PyPSA carrier names to fuel-based names
+    # This handles cases where CCGT/OCGT both map to "gas"
+    fuel_based_colors = {}
+    default_colors = {
+        'coal': '#000000',
+        'gas': '#FF6B6B',
+        'nuclear': '#4ECDC4',
+        'oil': '#FFE66D',
+        'hydro': '#95E1D3',
+        'onwind': '#A8E6CF',
+        'offwind': '#88D8C0',
+        'solar': '#FFD93D',
+        'battery': '#6C5CE7',
+        'other': '#9B59B6',  # Purple to distinguish from coal (black)
+    }
+    
+    # Get original carrier names from pypsa_df (before mapping)
+    original_carriers = set(pypsa_df['carrier'].unique())
+    for orig_carrier in original_carriers:
+        fuel_carrier = map_pypsa_to_fuel_carrier(orig_carrier)
+        # Use original carrier color if available, otherwise use default
+        if orig_carrier in carrier_colors:
+            # Only set if not already set (first one wins for multiple mappings)
+            if fuel_carrier not in fuel_based_colors:
+                fuel_based_colors[fuel_carrier] = carrier_colors[orig_carrier]
+        elif fuel_carrier in default_colors:
+            # Use default color if original carrier not in carrier_colors
+            if fuel_carrier not in fuel_based_colors:
+                fuel_based_colors[fuel_carrier] = default_colors[fuel_carrier]
+    
+    # Ensure all carriers have colors (use defaults or gray)
+    for carrier in all_carriers:
+        if carrier not in fuel_based_colors:
+            fuel_based_colors[carrier] = default_colors.get(carrier, '#9B59B6')  # Purple default
+    
+    # Get colors for carriers (use mapped colors, fallback to default if missing)
+    pypsa_colors = [fuel_based_colors.get(c, '#9B59B6') for c in all_carriers]  # Purple default
+    sienna_colors = [fuel_based_colors.get(c, '#9B59B6') for c in all_carriers]  # Purple default
     
     # Calculate y-axis limits (include load in max calculation)
     ymin = min(pypsa_neg.sum(axis=1).min(), sienna_neg.sum(axis=1).min())
@@ -414,14 +536,15 @@ def plot_side_by_side_energy_balance(pypsa_df, sienna_df, carrier_colors, timest
     # Create shared legend (generators + load)
     import matplotlib.patches as mpatches
     import matplotlib.lines as mlines
-    handles = [mpatches.Patch(color=carrier_colors.get(c, '#808080'), label=c) for c in all_carriers]
+    handles = [mpatches.Patch(color=fuel_based_colors.get(c, '#9B59B6'), label=c) for c in all_carriers]
     # Add load line to legend
     load_handle = mlines.Line2D([], [], color='red', linestyle='--', linewidth=2, label='Load')
     handles.append(load_handle)
     legend_labels = all_carriers + ['Load']
-    fig.legend(handles, legend_labels, bbox_to_anchor=(0.5, -0.05), loc='lower center', ncol=min(len(legend_labels), 8))
     
-    plt.tight_layout()
+    # Adjust layout to make room for legend (ensure bottom row is visible)
+    plt.tight_layout(rect=[0, 0.12, 1, 1])  # Reserve bottom 12% for legend
+    fig.legend(handles, legend_labels, bbox_to_anchor=(0.5, 0.02), loc='lower center', ncol=min(len(legend_labels), 8))
     
     if output_file:
         plt.savefig(output_file, dpi=150, bbox_inches='tight')

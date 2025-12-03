@@ -380,6 +380,66 @@ else
     set_device_model!(template, ThermalStandard, ThermalStandardDispatch)
     set_device_model!(template, RenewableDispatch, RenewableFullDispatch)
     
+    # Debug: Check wind generator marginal costs
+    println("\nDebug: Wind generator marginal costs:")
+    local renewable_gens = collect(get_components(RenewableDispatch, sys))
+    local wind_gens = [g for g in renewable_gens if get_prime_mover_type(g) in [PrimeMovers.WT, PrimeMovers.WS]]
+    
+    wind_marginal_costs = Float64[]
+    wind_zero_cost_count = 0
+    wind_nonzero_cost_count = 0
+    
+    for gen in wind_gens[1:min(10, length(wind_gens))]  # Check first 10
+        gen_name = get_name(gen)
+        try
+            op_cost = get_operation_cost(gen)
+            if op_cost !== nothing
+                # For RenewableGenerationCost, get variable cost
+                var_cost = get_variable(op_cost)
+                if var_cost !== nothing
+                    value_curve = get_value_curve(var_cost)
+                    if value_curve !== nothing
+                        # Check if it's a LinearCurve (marginal cost is proportional_term)
+                        if isa(value_curve, PowerSystems.LinearCurve)
+                            mc = get_proportional_term(value_curve)
+                            push!(wind_marginal_costs, mc)
+                            if abs(mc) < 1e-6
+                                wind_zero_cost_count += 1
+                                println("  $gen_name: marginal_cost = $mc \$/MWh (zero)")
+                            else
+                                wind_nonzero_cost_count += 1
+                                println("  $gen_name: marginal_cost = $mc \$/MWh ⚠️  NON-ZERO!")
+                            end
+                        else
+                            println("  $gen_name: value_curve is $(typeof(value_curve)), not LinearCurve")
+                        end
+                    else
+                        println("  $gen_name: value_curve is nothing")
+                    end
+                else
+                    println("  $gen_name: no variable cost")
+                end
+            else
+                println("  $gen_name: no operation_cost")
+            end
+        catch e
+            println("  $gen_name: error getting operation_cost - $e")
+        end
+    end
+    
+    # Summary of marginal costs
+    if !isempty(wind_marginal_costs)
+        println("\n  Wind marginal cost summary (first $(min(10, length(wind_gens))) generators):")
+        println("    Zero cost: $wind_zero_cost_count")
+        println("    Non-zero cost: $wind_nonzero_cost_count")
+        if wind_nonzero_cost_count > 0
+            println("    ⚠️  WARNING: Some wind generators have non-zero marginal costs!")
+            println("    This could explain why wind is not being fully dispatched.")
+            println("    Non-zero costs: $(wind_marginal_costs[wind_marginal_costs .!= 0.0])")
+        end
+        println("    Cost range: [$(round(minimum(wind_marginal_costs), digits=6)), $(round(maximum(wind_marginal_costs), digits=6))] \$/MWh")
+    end
+    
     # Configure StaticPowerLoad - use default "max_active_power" time series name
     # Note: There was a PowerSystems v5 bug where get_max_active_power() returns MW instead of per-unit
     # when a time series named "max_active_power" exists, but this may have been fixed or the workaround
@@ -494,6 +554,90 @@ if !isempty(storage_units)
         end
     end
 end
+
+# ===== SIENNA SYSTEM CAPACITY COMPARISON TABLE =====
+println("\n" * "="^80)
+println("SIENNA SYSTEM METRICS")
+println("="^80)
+
+# Collect all components
+loads = collect(get_components(PowerLoad, sys))
+thermal_gens = collect(get_components(ThermalStandard, sys))
+all_renewable_gens = collect(get_components(RenewableDispatch, sys))
+storage_units = collect(get_components(EnergyReservoirStorage, sys))
+buses = collect(get_components(ACBus, sys))
+
+# Filter renewable generators by prime mover type
+solar_gens = [g for g in all_renewable_gens if get_prime_mover_type(g) == PrimeMovers.PVe]
+wind_gens = [g for g in all_renewable_gens if get_prime_mover_type(g) in [PrimeMovers.WT, PrimeMovers.WS]]
+hydro_gens = [g for g in all_renewable_gens if get_prime_mover_type(g) == PrimeMovers.HY]
+# Renewable excluding hydro
+renewable_gens_excl_hydro = [g for g in all_renewable_gens if get_prime_mover_type(g) != PrimeMovers.HY]
+
+# Calculate metrics
+load_count = length(loads)
+total_max_load = isempty(loads) ? 0.0 : sum(get_max_active_power(l) for l in loads)
+peak_load = isempty(loads) ? 0.0 : maximum(get_max_active_power(l) for l in loads)
+
+solar_count = length(solar_gens)
+wind_count = length(wind_gens)
+hydro_count = length(hydro_gens)
+thermal_count = length(thermal_gens)
+total_generators = thermal_count + length(all_renewable_gens)
+
+thermal_capacity = isempty(thermal_gens) ? 0.0 : sum(get_max_active_power(g) for g in thermal_gens)
+renewable_capacity = isempty(renewable_gens_excl_hydro) ? 0.0 : sum(get_max_active_power(g) for g in renewable_gens_excl_hydro)
+hydro_capacity = isempty(hydro_gens) ? 0.0 : sum(get_max_active_power(g) for g in hydro_gens)
+total_capacity = thermal_capacity + renewable_capacity + hydro_capacity
+
+storage_count = length(storage_units)
+storage_capacity = if !isempty(storage_units)
+    local total = 0.0
+    for s in storage_units
+        input_limits = get_input_active_power_limits(s)
+        output_limits = get_output_active_power_limits(s)
+        total += max(input_limits.max, output_limits.max)
+    end
+    total
+else
+    0.0
+end
+
+bus_count = length(buses)
+
+# Print formatted table
+println("\n" * " " ^ 30 * "Metric" * " " ^ 20 * "Sienna")
+println("-" ^ 80)
+
+# Helper function for formatting
+function format_metric(name::String, value::Union{Int, Float64, String})
+    if value isa Float64
+        value_str = @sprintf("%.2f", value)
+    else
+        value_str = string(value)
+    end
+    println(lpad(name, 50) * " | " * rpad(value_str, 20))
+end
+
+format_metric("Load Count", load_count)
+format_metric("Total Max Load (MW)", total_max_load)
+format_metric("Peak Load (MW)", peak_load)
+format_metric("Solar Generators", solar_count)
+format_metric("Wind Generators", wind_count)
+format_metric("Hydro Generators", hydro_count)
+format_metric("Total Generators", total_generators)
+format_metric("Thermal Generators", thermal_count)
+format_metric("Thermal Capacity (MW)", thermal_capacity)
+format_metric("Renewable Generators (RenewableDispatch)", length(all_renewable_gens))
+format_metric("Renewable Capacity (MW)", renewable_capacity)
+format_metric("Hydro Generators (HydroDispatch)", hydro_count)
+format_metric("Hydro Capacity (MW)", hydro_capacity)
+format_metric("Total Generation Capacity (MW)", total_capacity)
+format_metric("Storage Units", storage_count)
+format_metric("Storage Capacity (MW)", storage_capacity)
+format_metric("Buses", bus_count)
+
+println("="^80)
 
 # DEBUG: Check load vs generation at specific time steps (especially time step 5 where conflict occurs)
 println("\nChecking load vs generation capacity at key time steps...")
@@ -678,6 +822,304 @@ try
     global objective = get_objective_value(results)
     println("✓ Model solved successfully!")
     println("  Objective: $(objective)")
+    
+    # Debug: Comprehensive wind dispatch and capacity analysis
+    println("\n" * "="^80)
+    println("WIND DISPATCH DEBUGGING")
+    println("="^80)
+    try
+        using PowerSimulations: read_variable, TableFormat
+        local renewable_gens = collect(get_components(RenewableDispatch, sys))
+        local wind_gens = [g for g in renewable_gens if get_prime_mover_type(g) in [PrimeMovers.WT, PrimeMovers.WS]]
+        
+        println("\nTotal wind generators: $(length(wind_gens))")
+        
+        renewable_df = read_variable(results, ActivePowerVariable, RenewableDispatch, table_format=TableFormat.LONG)
+        if !isempty(renewable_df)
+            first_ts = renewable_df.DateTime[1]
+            println("Analyzing time step: $first_ts")
+            
+            # Per-generator debugging
+            println("\n" * "-"^80)
+            println("PER-GENERATOR DETAILS (first 10 generators):")
+            println("-"^80)
+            println(lpad("Generator", 30), " | ", 
+                    rpad("Base Power", 12), " | ",
+                    rpad("Rating", 8), " | ",
+                    rpad("PF", 6), " | ",
+                    rpad("Max Active", 12), " | ",
+                    rpad("TS Value", 12), " | ",
+                    rpad("TS Range?", 10), " | ",
+                    rpad("Avail (CF*BP)", 15), " | ",
+                    rpad("Avail (CF*Max)", 15), " | ",
+                    rpad("Dispatch", 12), " | ",
+                    rpad("Util %", 8), " | ",
+                    rpad("Marg Cost", 10))
+            println("-"^80)
+            
+            wind_dispatch_ts1 = 0.0
+            wind_available_ts1_base = 0.0
+            wind_available_ts1_max = 0.0
+            total_base_power = 0.0
+            ts_values_all = Float64[]
+            ts_values_gt_one = 0
+            generators_with_ts = 0
+            
+            for (idx, gen) in enumerate(wind_gens[1:min(10, length(wind_gens))])
+                gen_name = get_name(gen)
+                base_power = get_base_power(gen)
+                rating = get_rating(gen)
+                power_factor = get_power_factor(gen)
+                max_active = get_max_active_power(gen)
+                total_base_power += base_power
+                
+                # Get dispatch
+                dispatch_val = 0.0
+                gen_rows = filter(row -> row.name == gen_name && row.DateTime == first_ts, renewable_df)
+                if !isempty(gen_rows)
+                    dispatch_val = gen_rows.value[1]
+                    wind_dispatch_ts1 += dispatch_val
+                end
+                
+                # Get available (from time series) - try both methods
+                available_base = 0.0
+                available_max = 0.0
+                ts_value_raw = nothing
+                ts_in_range = "?"
+                ts_data = nothing  # Declare outside try block for use in debugging
+                
+                try
+                    ts_data = get_time_series_array(DeterministicSingleTimeSeries, gen, "max_active_power")
+                    if ts_data !== nothing && length(ts_data) >= 1
+                        generators_with_ts += 1
+                        ts_values = TimeSeries.values(ts_data)
+                        ts_value_raw = ts_values[1]
+                        push!(ts_values_all, ts_value_raw)
+                        
+                        # Check if time series is in per-unit range (0-1)
+                        ts_min = minimum(ts_values)
+                        ts_max = maximum(ts_values)
+                        ts_mean = mean(ts_values)
+                        
+                        if ts_max > 1.0
+                            ts_in_range = "NO (>1.0)"
+                            ts_values_gt_one += 1
+                            # If > 1.0, might be in MW - check if it matches base_power
+                            if abs(ts_max - base_power) < 0.01 * base_power
+                                ts_in_range = "MW (match)"
+                            end
+                        elseif ts_max <= 1.0 && ts_min >= 0.0
+                            ts_in_range = "YES (0-1)"
+                        else
+                            ts_in_range = "NO (<0)"
+                        end
+                        
+                        # Method 1: capacity_factor * base_power
+                        available_base = ts_value_raw * base_power
+                        wind_available_ts1_base += available_base
+                        
+                        # Method 2: capacity_factor * get_max_active_power() (matches line 683 pattern)
+                        available_max = ts_value_raw * max_active
+                        wind_available_ts1_max += available_max
+                    else
+                        ts_in_range = "NO TS"
+                    end
+                catch e
+                    ts_in_range = "ERROR"
+                end
+                
+                utilization = available_base > 0 ? (dispatch_val / available_base * 100) : 0.0
+                
+                # Get marginal cost
+                marginal_cost_str = "N/A"
+                marginal_cost_val = nothing
+                try
+                    op_cost = get_operation_cost(gen)
+                    if op_cost !== nothing
+                        var_cost = get_variable(op_cost)
+                        if var_cost !== nothing
+                            value_curve = get_value_curve(var_cost)
+                            if value_curve !== nothing && isa(value_curve, PowerSystems.LinearCurve)
+                                mc = get_proportional_term(value_curve)
+                                marginal_cost_val = mc
+                                marginal_cost_str = @sprintf("%.4f", mc)
+                            end
+                        end
+                    end
+                catch
+                    marginal_cost_str = "ERROR"
+                end
+                
+                println(lpad(gen_name, 30), " | ",
+                        rpad(@sprintf("%.2f", base_power), 12), " | ",
+                        rpad(@sprintf("%.3f", rating), 8), " | ",
+                        rpad(@sprintf("%.3f", power_factor), 6), " | ",
+                        rpad(@sprintf("%.2f", max_active), 12), " | ",
+                        rpad(ts_value_raw !== nothing ? @sprintf("%.6f", ts_value_raw) : "N/A", 12), " | ",
+                        rpad(ts_in_range, 10), " | ",
+                        rpad(@sprintf("%.2f", available_base), 15), " | ",
+                        rpad(@sprintf("%.2f", available_max), 15), " | ",
+                        rpad(@sprintf("%.2f", dispatch_val), 12), " | ",
+                        rpad(@sprintf("%.1f", utilization), 8), " | ",
+                        rpad(marginal_cost_str, 10))
+                
+                # Debug zero dispatch cases
+                if dispatch_val == 0.0 && ts_value_raw !== nothing && ts_value_raw > 0.0
+                    println("    ⚠️  WARNING: $gen_name has TS value $(ts_value_raw) but dispatch is 0.00")
+                    
+                    # Check generator availability
+                    try
+                        is_available = get_available(gen)
+                        println("      Generator available: $is_available")
+                    catch
+                        println("      Generator available: (could not check)")
+                    end
+                    
+                    # Check if TS value at timestep 1 is actually 0
+                    if ts_data !== nothing && length(ts_data) >= 1
+                        ts_values_full = TimeSeries.values(ts_data)
+                        ts_timestamps = TimeSeries.timestamp(ts_data)
+                        println("      TS value at timestep 1: $(ts_values_full[1])")
+                        if length(ts_values_full) > 1
+                            println("      TS value at timestep 2: $(ts_values_full[2])")
+                        end
+                        println("      TS min/max across all timesteps: $(minimum(ts_values_full)) / $(maximum(ts_values_full))")
+                        
+                        # Check if timestep 1 TS is actually 0
+                        if abs(ts_values_full[1]) < 1e-6
+                            println("      ✓ TS value at timestep 1 is ~0.0 - explains zero dispatch")
+                        else
+                            println("      ⚠️  TS value at timestep 1 is NOT 0.0 - dispatch should be > 0")
+                            if marginal_cost_val !== nothing
+                                println("      Marginal cost: $(marginal_cost_val) \$/MWh")
+                                if abs(marginal_cost_val) > 1e-6
+                                    println("      ⚠️  Generator has non-zero marginal cost - may explain low dispatch")
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+            
+            # Summary statistics
+            println("\n" * "-"^80)
+            println("SUMMARY STATISTICS:")
+            println("-"^80)
+            println("  Total wind generators: $(length(wind_gens))")
+            println("  Generators with time series: $generators_with_ts")
+            println("  Total base_power (nameplate): $(round(sum(get_base_power(g) for g in wind_gens), digits=2)) MW")
+            
+            if !isempty(ts_values_all)
+                println("  Time series value statistics:")
+                println("    Min: $(round(minimum(ts_values_all), digits=6))")
+                println("    Max: $(round(maximum(ts_values_all), digits=6))")
+                println("    Mean: $(round(mean(ts_values_all), digits=6))")
+                println("    Median: $(round(median(ts_values_all), digits=6))")
+                println("  Generators with TS values > 1.0: $ts_values_gt_one")
+                if ts_values_gt_one > 0
+                    println("    ⚠️  WARNING: Time series values > 1.0 detected!")
+                    println("    This suggests time series might be in MW, not per-unit (0-1)")
+                end
+            end
+            
+            println("\n  Time step 1 (first timestep) totals:")
+            println("    Wind dispatched: $(round(wind_dispatch_ts1, digits=2)) MW")
+            println("    Wind available (method 1: CF * base_power): $(round(wind_available_ts1_base, digits=2)) MW")
+            println("    Wind available (method 2: CF * get_max_active_power()): $(round(wind_available_ts1_max, digits=2)) MW")
+            
+            if wind_available_ts1_base > 0
+                utilization_base = wind_dispatch_ts1 / wind_available_ts1_base * 100
+                println("    Wind utilization (method 1): $(round(utilization_base, digits=1))%")
+            end
+            if wind_available_ts1_max > 0
+                utilization_max = wind_dispatch_ts1 / wind_available_ts1_max * 100
+                println("    Wind utilization (method 2): $(round(utilization_max, digits=1))%")
+            end
+            
+            # Compare with working code pattern (from lines 674-689)
+            println("\n  Comparison with working code pattern (from load vs generation check):")
+            try
+                local renewable_gens_check = collect(get_components(RenewableDispatch, sys))
+                local wind_gens_check = [g for g in renewable_gens_check if get_prime_mover_type(g) in [PrimeMovers.WT, PrimeMovers.WS]]
+                local total_renewable_available_check = 0.0
+                for gen in wind_gens_check
+                    max_cap = get_max_active_power(gen)
+                    try
+                        ts_data = get_time_series_array(DeterministicSingleTimeSeries, gen, "max_active_power")
+                        if ts_data !== nothing && length(ts_data) > 0
+                            capacity_factor = TimeSeries.values(ts_data)[1]
+                            if 0.0 <= capacity_factor <= 1.0
+                                total_renewable_available_check += capacity_factor * max_cap
+                            else
+                                total_renewable_available_check += max_cap
+                            end
+                        else
+                            total_renewable_available_check += max_cap
+                        end
+                    catch
+                        total_renewable_available_check += max_cap
+                    end
+                end
+                println("    Wind available (working pattern: CF * get_max_active_power()): $(round(total_renewable_available_check, digits=2)) MW")
+                if total_renewable_available_check > 0
+                    utilization_working = wind_dispatch_ts1 / total_renewable_available_check * 100
+                    println("    Wind utilization (working pattern): $(round(utilization_working, digits=1))%")
+                end
+            catch e
+                println("    Could not calculate using working pattern: $e")
+            end
+            
+            # Check optimizer constraints (what the optimizer actually sees)
+            println("\n  Optimizer constraint inspection:")
+            try
+                using PowerSimulations: read_parameter, ActivePowerTimeSeriesParameter
+                # Try to read the parameter values that the optimizer uses
+                # These should match the time series constraints
+                param_key = ActivePowerTimeSeriesParameter()
+                try
+                    param_df = read_parameter(results, param_key, RenewableDispatch, table_format=TableFormat.LONG)
+                    if !isempty(param_df)
+                        # Filter to wind generators and first timestep
+                        wind_param_df = filter(row -> begin
+                            gen = get_component(RenewableDispatch, sys, row.name)
+                            pm = get_prime_mover_type(gen)
+                            pm in [PrimeMovers.WT, PrimeMovers.WS]
+                        end && row.DateTime == first_ts, param_df)
+                        
+                        if !isempty(wind_param_df)
+                            total_param_upper_bound = sum(wind_param_df.value)
+                            println("    Wind parameter upper bounds (from optimizer): $(round(total_param_upper_bound, digits=2)) MW")
+                            println("    This is what the optimizer sees as the constraint limit")
+                            println("    Compare with calculated available: $(round(wind_available_ts1_base, digits=2)) MW (method 1)")
+                            println("    Compare with calculated available: $(round(wind_available_ts1_max, digits=2)) MW (method 2)")
+                            
+                            if total_param_upper_bound > 0
+                                param_utilization = wind_dispatch_ts1 / total_param_upper_bound * 100
+                                println("    Wind utilization (vs optimizer constraint): $(round(param_utilization, digits=1))%")
+                            end
+                        else
+                            println("    Could not find wind generator parameters in optimizer results")
+                        end
+                    else
+                        println("    No parameter data found in results")
+                    end
+                catch e2
+                    println("    Could not read parameter values: $e2")
+                    println("    (This is expected if parameters are not stored in results)")
+                end
+            catch e
+                println("    Could not inspect optimizer constraints: $e")
+            end
+        end
+        println("="^80)
+    catch e
+        println("  Could not check wind dispatch: $e")
+        println("  Stacktrace:")
+        for (exc, bt) in Base.catch_stack()
+            showerror(stdout, exc, bt)
+            println()
+        end
+    end
 catch e
     println("  ✗ Model solve failed: $e")
     println("  The issue is likely a constraint violation (e.g., power balance, storage, hydro, or ramp constraints).")
@@ -1029,19 +1471,19 @@ if objective !== nothing
             println("SUMMARY STATISTICS:")
             println("-"^80)
             if !isempty(hydro_summary)
-                total_capacity = sum(hydro_summary.capacity_mw)
-                total_ts_max = sum(hydro_summary.ts_max_mw)
-                total_sienna = sum(hydro_summary.sienna_total_mwh)
-                total_zero = sum(hydro_summary.zero_timesteps)
-                avg_utilization = isempty(hydro_summary.utilization_pct) ? 0.0 : mean(hydro_summary.utilization_pct)
+                local total_capacity = sum(hydro_summary.capacity_mw)
+                local total_ts_max = sum(hydro_summary.ts_max_mw)
+                local total_sienna = sum(hydro_summary.sienna_total_mwh)
+                local total_zero = sum(hydro_summary.zero_timesteps)
+                local avg_utilization = isempty(hydro_summary.utilization_pct) ? 0.0 : mean(hydro_summary.utilization_pct)
                 
                 println("Total Capacity: $(round(total_capacity, digits=2)) MW")
                 println("Total TS Max (sum of maxes): $(round(total_ts_max, digits=2)) MW")
                 println("Total Sienna Dispatch: $(round(total_sienna, digits=2)) MWh")
-                theoretical_max = total_ts_max * 168
+                local theoretical_max = total_ts_max * 168
                 println("Theoretical Max (if all at TS max for all timesteps): $(round(theoretical_max, digits=2)) MWh")
                 if theoretical_max > 0
-                    utilization_pct = (total_sienna / theoretical_max * 100)
+                    local utilization_pct = (total_sienna / theoretical_max * 100)
                     println("Sienna Utilization: $(round(utilization_pct, digits=1))%")
                 else
                     println("Sienna Utilization: N/A (no theoretical max)")
