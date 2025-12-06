@@ -254,6 +254,7 @@ OUTPUT_FIELDS = {
         "output_active_power_limits",
         "discharge_efficiency",
         "storage_technology_type",
+        "storage_target",
         "operation_cost",
         "services",
         "dynamic_injector",

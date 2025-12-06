@@ -124,7 +124,13 @@ def extract_sienna_generator_time_series(
     
     count = len(generators)
     with_ts_count = 0
-    total_capacity = sum(g.get('base_power', 0.0) for g in generators)
+    # Calculate total capacity using max_active_power = rating * base_power * power_factor
+    # With the new system: base_power = 100.0 (system-wide), rating = p_nom / 100.0 (per-unit)
+    # So max_active_power = (p_nom / 100.0) * 100.0 * 1.0 = p_nom MW
+    total_capacity = sum(
+        g.get('rating', 0.0) * g.get('base_power', 0.0) * g.get('power_factor', 1.0)
+        for g in generators
+    )
     total_ts = None
     
     if count == 0 or not h5_file.exists():
@@ -241,8 +247,13 @@ def extract_sienna_generator_time_series(
                     )
                     if gen_info:
                         base_power = gen_info.get('base_power', 0.0)
-                        # Time series is in per-unit (0-1), convert to MW: ts_pu * base_power
-                        ts_mw = pd.Series(ts_data * base_power, index=time_index)
+                        rating = gen_info.get('rating', 0.0)
+                        power_factor = gen_info.get('power_factor', 1.0)
+                        
+                        # Calculate max_active_power = rating * base_power * power_factor
+                        # Time series is in per-unit (0-1), convert to MW: ts_pu * max_active_power
+                        max_active_power = rating * base_power * power_factor
+                        ts_mw = pd.Series(ts_data * max_active_power, index=time_index)
                         gen_time_series[gen_uuid] = ts_mw
             
             # Sum all generator time series to get total generation at each timestep

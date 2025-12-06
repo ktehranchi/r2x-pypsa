@@ -523,7 +523,10 @@ def test_compare_pypsa_sienna_systems():
     pypsa_hydro = pypsa_generators[pypsa_generators.carrier == 'hydro']
     
     pypsa_thermal_capacity = pypsa_thermal.p_nom.sum() if len(pypsa_thermal) > 0 else 0.0
-    pypsa_renewable_capacity = pypsa_renewable.p_nom.sum() if len(pypsa_renewable) > 0 else 0.0
+    # Calculate renewable capacity excluding hydro (to match Sienna calculation)
+    pypsa_renewable_excluding_hydro = pypsa_renewable[pypsa_renewable.carrier != 'hydro']
+    pypsa_renewable_capacity = pypsa_renewable_excluding_hydro.p_nom.sum() if len(pypsa_renewable_excluding_hydro) > 0 else 0.0
+    pypsa_renewable_count_excluding_hydro = len(pypsa_renewable_excluding_hydro)
     pypsa_total_capacity = pypsa_generators.p_nom.sum()
     
     logger.info(f"Generators (p_nom > 0): {len(pypsa_generators)}")
@@ -536,6 +539,57 @@ def test_compare_pypsa_sienna_systems():
         pypsa_storage_capacity = network.storage_units.p_nom.sum()
         logger.info(f"Storage units: {len(network.storage_units)}")
         logger.info(f"  Storage capacity: {pypsa_storage_capacity:.2f} MW")
+        
+        # Check initial state of charge for all storage units
+        logger.info("=" * 80)
+        logger.info("PyPSA Storage Units - Initial State of Charge")
+        logger.info("=" * 80)
+        
+        for su_name, su_data in network.storage_units.iterrows():
+            p_nom = su_data.get('p_nom', 0.0)
+            max_hours = su_data.get('max_hours', 1.0)
+            storage_capacity = p_nom * max_hours  # MWh
+            state_of_charge_initial = su_data.get('state_of_charge_initial', 0.0)  # MWh
+            cyclic_state_of_charge = su_data.get('cyclic_state_of_charge', False)
+            cyclic_state_of_charge_per_period = su_data.get('cyclic_state_of_charge_per_period', True)
+            
+            # Calculate initial SOC as fraction
+            initial_soc_fraction = (state_of_charge_initial / storage_capacity) if storage_capacity > 0 else 0.0
+            
+            logger.info(f"\n{su_name}:")
+            logger.info(f"  p_nom: {p_nom:.2f} MW")
+            logger.info(f"  max_hours: {max_hours:.2f} hours")
+            logger.info(f"  storage_capacity: {storage_capacity:.2f} MWh")
+            logger.info(f"  state_of_charge_initial: {state_of_charge_initial:.2f} MWh")
+            logger.info(f"  initial_soc_fraction: {initial_soc_fraction:.4f} ({initial_soc_fraction*100:.2f}%)")
+            logger.info(f"  cyclic_state_of_charge: {cyclic_state_of_charge}")
+            logger.info(f"  cyclic_state_of_charge_per_period: {cyclic_state_of_charge_per_period}")
+            
+            # If cyclic_state_of_charge_per_period is True, check if there's a state_of_charge time series
+            if cyclic_state_of_charge_per_period and hasattr(network, 'storage_units_t'):
+                if hasattr(network.storage_units_t, 'state_of_charge'):
+                    soc_ts = network.storage_units_t.state_of_charge
+                    if su_name in soc_ts.columns:
+                        # Get first and last values
+                        first_soc = soc_ts[su_name].iloc[0] if len(soc_ts) > 0 else None
+                        last_soc = soc_ts[su_name].iloc[-1] if len(soc_ts) > 0 else None
+                        logger.info(f"  state_of_charge time series:")
+                        if first_soc is not None:
+                            logger.info(f"    First value: {first_soc:.2f} MWh")
+                        if last_soc is not None:
+                            logger.info(f"    Last value: {last_soc:.2f} MWh")
+        
+        # Summary
+        logger.info("\n" + "=" * 80)
+        logger.info("Storage Initial SOC Summary:")
+        logger.info("=" * 80)
+        total_initial_soc = network.storage_units.get('state_of_charge_initial', pd.Series([0.0])).sum()
+        total_capacity = (network.storage_units.p_nom * network.storage_units.max_hours).sum()
+        avg_initial_soc = (total_initial_soc / total_capacity) if total_capacity > 0 else 0.0
+        logger.info(f"Total initial SOC: {total_initial_soc:.2f} MWh")
+        logger.info(f"Total storage capacity: {total_capacity:.2f} MWh")
+        logger.info(f"Average initial SOC fraction: {avg_initial_soc:.4f} ({avg_initial_soc*100:.2f}%)")
+        logger.info("=" * 80)
     else:
         pypsa_storage_capacity = 0.0
         logger.info("Storage units: 0")
@@ -872,40 +926,48 @@ def test_compare_pypsa_sienna_systems():
     sienna_thermal_capacity = 0.0
     for g in sienna_thermal:
         base_power = g.get('base_power', 0.0)
-        active_power_limits = g.get('active_power_limits', {})
-        max_pu = active_power_limits.get('max', 0.0) if isinstance(active_power_limits, dict) else 0.0
-        # active_power_limits.max is per-unit, so multiply by base_power to get MW
-        sienna_thermal_capacity += base_power * max_pu
+        rating = g.get('rating', 0.0)
+        # For ThermalStandard, rating is per-unit relative to base_power
+        # Capacity = rating * base_power (in MW)
+        # Note: active_power_limits is per-unit relative to p_nom, not base_power, so we use rating instead
+        sienna_thermal_capacity += rating * base_power
     
     # Calculate renewable capacity (excluding hydro, which is counted separately)
+    # For RenewableDispatch: max_active_power = rating * base_power * power_factor
     sienna_renewable_capacity = 0.0
     for g in sienna_renewable:
         # Skip hydro generators (they're counted separately)
         if g.get('prime_mover_type') == 'HY':
             continue
         base_power = g.get('base_power', 0.0)
-        active_power_limits = g.get('active_power_limits', {})
-        max_pu = active_power_limits.get('max', 0.0) if isinstance(active_power_limits, dict) else 0.0
-        # active_power_limits.max is per-unit, so multiply by base_power to get MW
-        sienna_renewable_capacity += base_power * max_pu
+        rating = g.get('rating', 0.0)
+        power_factor = g.get('power_factor', 1.0)
+        # For RenewableDispatch: max_active_power = rating * base_power * power_factor
+        sienna_renewable_capacity += rating * base_power * power_factor
     
     # Calculate Sienna hydro capacity
+    # For RenewableDispatch: max_active_power = rating * base_power * power_factor
     sienna_hydro_capacity = 0.0
     for g in sienna_hydro:
         base_power = g.get('base_power', 0.0)
-        active_power_limits = g.get('active_power_limits', {})
-        max_pu = active_power_limits.get('max', 0.0) if isinstance(active_power_limits, dict) else 0.0
-        sienna_hydro_capacity += base_power * max_pu
+        rating = g.get('rating', 0.0)
+        power_factor = g.get('power_factor', 1.0)
+        # For RenewableDispatch: max_active_power = rating * base_power * power_factor
+        sienna_hydro_capacity += rating * base_power * power_factor
     
     # Total capacity: thermal + renewable (excluding hydro) + hydro
     sienna_total_capacity = sienna_thermal_capacity + sienna_renewable_capacity + sienna_hydro_capacity
+    
+    # Calculate renewable count excluding hydro (to match capacity calculation)
+    sienna_renewable_count_excluding_hydro = len(sienna_renewable) - len(sienna_hydro)
     
     # Total generator count: thermal + renewable (hydro is already included in renewable, so don't add it separately)
     sienna_total_generators = len(sienna_thermal) + len(sienna_renewable)
     logger.info(f"Generators: {sienna_total_generators}")
     logger.info(f"  ThermalStandard: {len(sienna_thermal)}, capacity: {sienna_thermal_capacity:.2f} MW")
-    logger.info(f"  RenewableDispatch: {len(sienna_renewable)}, capacity: {sienna_renewable_capacity:.2f} MW")
-    logger.info(f"    (includes {len(sienna_hydro)} hydro generators with capacity: {sienna_hydro_capacity:.2f} MW)")
+    logger.info(f"  RenewableDispatch: {len(sienna_renewable)} total (includes {len(sienna_hydro)} hydro), capacity: {sienna_renewable_capacity:.2f} MW (excluding hydro)")
+    logger.info(f"    Non-hydro renewable: {sienna_renewable_count_excluding_hydro}, capacity: {sienna_renewable_capacity:.2f} MW")
+    logger.info(f"    Hydro: {len(sienna_hydro)}, capacity: {sienna_hydro_capacity:.2f} MW")
     logger.info(f"  Total capacity: {sienna_total_capacity:.2f} MW")
 
     # Storage
@@ -982,9 +1044,9 @@ def test_compare_pypsa_sienna_systems():
         'Total Generators (p_nom > 0)',
         'Thermal Generators',
         'Thermal Capacity (MW)',
-        'Renewable Generators (RenewableDispatch)',
-        'Renewable Capacity (MW)',
-        'Hydro Generators (HydroDispatch)',
+        'Renewable Generators (RenewableDispatch, excluding hydro)',
+        'Renewable Capacity (MW, excluding hydro)',
+        'Hydro Generators (RenewableDispatch with prime_mover_type == HY)',
         'Hydro Capacity (MW)',
         'Total Generation Capacity (MW)',
         'Storage Units',
@@ -995,8 +1057,8 @@ def test_compare_pypsa_sienna_systems():
         len(pypsa_generators),
         len(pypsa_thermal),
         f"{pypsa_thermal_capacity:.2f}",
-        len(pypsa_renewable),
-        f"{pypsa_renewable_capacity:.2f}",
+        pypsa_renewable_count_excluding_hydro,  # Exclude hydro from renewable count to match Sienna
+        f"{pypsa_renewable_capacity:.2f}",  # Already excludes hydro
         len(pypsa_hydro),
         f"{pypsa_hydro.p_nom.sum() if len(pypsa_hydro) > 0 else 0.0:.2f}",
         f"{pypsa_total_capacity:.2f}",
@@ -1008,7 +1070,7 @@ def test_compare_pypsa_sienna_systems():
         len(sienna_thermal) + len(sienna_renewable),  # Total = thermal + renewable (hydro already included in renewable)
         len(sienna_thermal),
         f"{sienna_thermal_capacity:.2f}",
-        len(sienna_renewable),
+        sienna_renewable_count_excluding_hydro,  # Exclude hydro from renewable count to match capacity
         f"{sienna_renewable_capacity:.2f}",
         len(sienna_hydro),
         f"{sienna_hydro_capacity:.2f}",

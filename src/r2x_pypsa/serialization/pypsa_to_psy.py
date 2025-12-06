@@ -3,6 +3,7 @@
 from functools import singledispatch
 from typing import Any
 
+import pandas as pd
 from loguru import logger
 from r2x.api import Component, System
 from r2x.enums import ACBusTypes, PrimeMoversType, StorageTechs, ThermalFuels
@@ -342,19 +343,27 @@ def _(
         # No p_max_pu property - default to 1.0
         p_max_pu = 1.0
 
-    generator.base_power = p_nom
+    # Use system-wide base_power (like loads use 100.0)
+    # Do NOT set base_power = p_nom per-generator - base_power is system-wide for per-unitization
+    # For RenewableDispatch, get_max_active_power() returns get_rating() * power_factor
+    # get_rating() uses get_value() with Val(:mva), which multiplies by base_power when using NATURAL_UNITS
+    # So: get_max_active_power() = rating * base_power * power_factor
+    # To get p_nom MW, we need: rating = p_nom / base_power (in per-unit)
+    # PyPSA's p_nom already represents the full cluster capacity (e.g., 2650 MW)
+    # Use system-wide base_power for all generators
+    generator.base_power = 100.0  # System-wide base power (MVA), not per-generator
     
-    # For RenewableDispatch, get_max_active_power() returns rating * power_factor * base_power
-    # RenewableDispatch does NOT have active_power_limits field - max power is determined by rating * power_factor
-    # Set rating to 1.0 (per-unit, nameplate capacity) and power_factor to 1.0
-    # so that get_max_active_power() returns base_power = p_nom (the nameplate capacity)
     if isinstance(generator, RenewableDispatch):
-        generator.rating = 1.0  # Per-unit rating (1.0 = nameplate capacity)
+        generator.rating = p_nom / 100.0  # Store rating in per-unit (relative to base_power)
         generator.power_factor = 1.0  # Power factor = 1.0 for full active power capability
     else:
-        # For ThermalStandard and other generators, set active_power_limits
+        # For ThermalStandard and other generators, set rating and active_power_limits
+        # rating is per-unit relative to base_power, so: rating = p_nom / base_power
+        generator.rating = p_nom / 100.0  # Store rating in per-unit (relative to base_power)
+        # active_power_limits should be in MW (not per-unit) according to PowerSystems.jl docs
+        # But the JSON serialization might convert it, so we'll set it as per-unit relative to base_power for consistency
         generator.active_power_limits = create_minmax_from_pypsa(
-            p_min_pu * p_nom, p_max_pu * p_nom, p_nom
+            p_min_pu * p_nom, p_max_pu * p_nom, 100.0  # Use base_power (100.0) instead of p_nom
         )
 
     generator.services = []
@@ -362,53 +371,18 @@ def _(
 
     # Handle time series - extract from PypsaProperty if it exists
     # For renewable and hydro generators, p_max_pu is the capacity factor time series (per-unit 0-1)
-    # Store in per-unit (0-1) - PowerSimulations will multiply by get_max_active_power() to get MW
-    # This works correctly with FixedOutput for hydro (must-run at available capacity)
+    # PowerSimulations multiplies time series by get_max_active_power() to get MW
+    # So store time series in per-unit (0-1), NOT in MW
     if hasattr(component, "p_max_pu"):
         if hasattr(component.p_max_pu, "has_time_series") and component.p_max_pu.has_time_series():
             ts_data = component.p_max_pu.get_time_series()
             
-            # Validate time series is in per-unit range (0-1)
-            # PyPSA p_max_pu should already be in per-unit, but verify
-            if hasattr(ts_data, 'values'):
-                ts_values = ts_data.values if hasattr(ts_data.values, '__iter__') else [ts_data.values]
-                ts_min = float(min(ts_values)) if len(ts_values) > 0 else 0.0
-                ts_max = float(max(ts_values)) if len(ts_values) > 0 else 0.0
-                ts_mean = float(sum(ts_values) / len(ts_values)) if len(ts_values) > 0 else 0.0
-                
-                # Check if values are outside expected per-unit range (0-1)
-                # If max > 1.0, might be in MW instead of per-unit - need to normalize
-                if ts_max > 1.5:  # Likely in MW, not per-unit
-                    logger.warning(
-                        f"Generator {component.name} time series max={ts_max:.2f} > 1.5, "
-                        f"appears to be in MW not per-unit. Normalizing by p_nom={p_nom:.2f} MW"
-                    )
-                    # Normalize by p_nom to convert to per-unit
-                    ts_data = ts_data / p_nom
-                    ts_max = ts_max / p_nom
-                    ts_mean = ts_mean / p_nom
-                elif ts_max > 1.0:
-                    logger.warning(
-                        f"Generator {component.name} time series max={ts_max:.2f} > 1.0, "
-                        f"clamping to 1.0 (per-unit range)"
-                    )
-                    ts_data = ts_data.clip(upper=1.0)
-                    ts_max = 1.0
-                
-                logger.info(
-                    f"Added time series for generator {component.name}: "
-                    f"length={len(ts_data)}, min={ts_min:.3f}, max={ts_max:.3f}, mean={ts_mean:.3f} "
-                    f"(per-unit), p_nom={p_nom:.2f} MW, "
-                    f"rating={generator.rating if isinstance(generator, RenewableDispatch) else 'N/A'}, "
-                    f"power_factor={generator.power_factor if isinstance(generator, RenewableDispatch) else 'N/A'}"
-                )
-            else:
-                logger.info(f"Added time series for generator {component.name} (length: {len(ts_data)}, stored in per-unit 0-1)")
-            
-            # Keep time series in per-unit (0-1) - scaling_factor_multiplier will multiply by get_max_active_power()
-            # For FixedOutput, this ensures the generator dispatches at the time series value (in MW after scaling)
+            # Keep time series in per-unit (0-1) - PowerSimulations will multiply by get_max_active_power()
+            # get_max_active_power() = rating * base_power * power_factor = (p_nom / 100.0) * 100.0 * 1.0 = p_nom MW
+            # So constraint will be: ts_value * p_nom = (p_max_pu * p_nom) which is correct
             ts = create_single_time_series_from_pandas(ts_data, "max_active_power")
             psy_system.add_time_series(ts, generator)
+            logger.info(f"Added time series for generator {component.name} (length: {len(ts_data)}, stored in per-unit 0-1)")
         else:
             logger.debug(f"Generator {component.name} p_max_pu has no time series")
 
@@ -608,7 +582,26 @@ def _(
     psy_system: System,
     mapping: dict[str, Any] | None = None,
 ):
-    """Convert a PypsaStorageUnit to an EnergyReservoirStorage."""
+    """Convert a PypsaStorageUnit to an EnergyReservoirStorage.
+    
+    NOTE: If a corresponding PypsaStore exists with the same name, skip this conversion.
+    The Store will be converted instead and will use this StorageUnit's power-side data
+    (p_nom, efficiencies, time series) while using the Store's energy-side data (e_nom, e_initial, etc.).
+    """
+    # Check if a corresponding Store exists - if so, skip StorageUnit conversion
+    # The Store will handle the conversion and use StorageUnit's power-side data
+    try:
+        store = pypsa_system.get_component(PypsaStore, component.name)
+        if store:
+            logger.debug(
+                f"StorageUnit {component.name} has corresponding Store, "
+                f"skipping StorageUnit conversion (Store will be converted with StorageUnit's power limits)"
+            )
+            return
+    except Exception:
+        # No corresponding Store, proceed with StorageUnit conversion
+        pass
+
     # Get bus connection
     bus_name = get_pypsa_property(pypsa_system, component, "bus")
     if not bus_name:
@@ -627,9 +620,10 @@ def _(
     efficiency_store = get_pypsa_property(pypsa_system, component, "efficiency_store") or 1.0
     efficiency_dispatch = get_pypsa_property(pypsa_system, component, "efficiency_dispatch") or 1.0
     state_of_charge_initial = get_pypsa_property(pypsa_system, component, "state_of_charge_initial") or 0.0
+    cyclic_state_of_charge_per_period = get_pypsa_property(pypsa_system, component, "cyclic_state_of_charge_per_period") or False
 
-    if p_nom is None or p_nom < 0:
-        logger.warning(f"Storage {component.name} has invalid power capacity")
+    if p_nom is None or p_nom <= 0:
+        logger.warning(f"Storage {component.name} has zero or invalid power capacity")
         return
 
     # Calculate storage capacity
@@ -639,27 +633,82 @@ def _(
     p_min_pu = get_pypsa_property(pypsa_system, component, "p_min_pu") or -1.0
     p_max_pu = get_pypsa_property(pypsa_system, component, "p_max_pu") or 1.0
 
-    # Calculate base_power and per-unit limits
-    base_power = max(p_nom, 0.001)
-    # Power limits should be in per-unit (like rating)
-    # When get_value() is called with Val(:mva), it multiplies by base_power to convert to MW
-    # So max should be 1.0 (per-unit) to match rating
-    max_power_pu = 1.0  # Per-unit (nameplate capacity)
+    # System-wide base power (matching loads & renewables)
+    base_power = 100.0  
+
+    rating_pu = p_nom / base_power
+
+    # Handle initial state of charge
+    # For cyclic storage, PyPSA optimizes such that initial = final.
+    # Try to get initial SOC from state_of_charge_set time series if available,
+    # otherwise use state_of_charge_initial or a reasonable default.
+    initial_storage_capacity_level = 0.0  # Default
     
+    # Check for state_of_charge_set time series (set point, may indicate initial value)
+    soc_from_ts = None
+    try:
+        if hasattr(component, 'state_of_charge_set'):
+            soc_set_prop = getattr(component, 'state_of_charge_set')
+            if hasattr(soc_set_prop, 'has_time_series') and soc_set_prop.has_time_series():
+                soc_set_ts = soc_set_prop.get_time_series()
+                if soc_set_ts is not None and len(soc_set_ts) > 0:
+                    # Use first value from time series (in MWh)
+                    soc_from_ts = float(soc_set_ts.iloc[0])
+                    if not pd.isna(soc_from_ts) and soc_from_ts >= 0:
+                        initial_storage_capacity_level = soc_from_ts / storage_capacity if storage_capacity > 0 else 0.0
+                        logger.debug(
+                            f"Storage {component.name} using first value from state_of_charge_set time series: "
+                            f"{soc_from_ts:.2f} MWh ({initial_storage_capacity_level*100:.1f}% of capacity)"
+                        )
+    except Exception as e:
+        logger.debug(f"Could not get state_of_charge_set time series for {component.name}: {e}")
+    
+    # If no time series available, use state_of_charge_initial or default
+    if soc_from_ts is None or pd.isna(soc_from_ts):
+        if cyclic_state_of_charge_per_period:
+            # For cyclic storage, PyPSA ignores state_of_charge_initial and optimizes initial = final.
+            # Use state_of_charge_initial if available, otherwise 50% as a reasonable default.
+            if state_of_charge_initial > 0 and storage_capacity > 0:
+                initial_storage_capacity_level = state_of_charge_initial / storage_capacity
+                logger.debug(
+                    f"Storage {component.name} has cyclic_state_of_charge_per_period=True, "
+                    f"using state_of_charge_initial={state_of_charge_initial:.2f} MWh "
+                    f"({initial_storage_capacity_level*100:.1f}% of capacity). "
+                    f"Note: PyPSA will optimize such that initial = final during optimization."
+                )
+            else:
+                initial_storage_capacity_level = 0.0
+                logger.debug(
+                    f"Storage {component.name} has cyclic_state_of_charge_per_period=True, "
+                    f"using default initial SOC of 0% "
+                    f"(state_of_charge_initial={state_of_charge_initial:.2f} MWh). "
+                    f"Note: PyPSA will optimize such that initial = final during optimization."
+                )
+        else:
+            # For non-cyclic storage, use the actual state_of_charge_initial value
+            initial_storage_capacity_level = state_of_charge_initial / storage_capacity if storage_capacity > 0 else 0.0
+            logger.debug(
+                f"Storage {component.name} (non-cyclic) using state_of_charge_initial={state_of_charge_initial:.2f} MWh "
+                f"({initial_storage_capacity_level*100:.1f}% of capacity)"
+            )
+
+    # IMPORTANT: Power limits must be in per-unit (relative to base_power) for PowerSystems.jl
+    # PowerSystems.jl's get_input_active_power_limits() and get_output_active_power_limits()
+    # multiply by base_power when NATURAL_UNITS is set, so we must set them in per-unit here.
     battery = EnergyReservoirStorage(
         uuid=component.uuid,
         name=component.name,
         bus=bus,
         base_power=base_power,
-        rating=1.0,  # Per-unit rating (1.0 = nameplate capacity)
-        initial_storage_capacity_level=state_of_charge_initial / storage_capacity if storage_capacity > 0 else 0.0,
+        rating=rating_pu,     # per-unit (for rating field)
+        initial_storage_capacity_level=initial_storage_capacity_level,
         efficiency=create_inputoutput_from_pypsa(efficiency_store, efficiency_dispatch),
-        input_active_power_limits=MinMax(min=0, max=max_power_pu),  # Per-unit
-        output_active_power_limits=MinMax(min=0, max=max_power_pu),  # Per-unit
+        input_active_power_limits=MinMax(min=0.0, max=p_nom / base_power),   # per-unit (will be multiplied by base_power in NATURAL_UNITS)
+        output_active_power_limits=MinMax(min=0.0, max=p_nom / base_power),  # per-unit (will be multiplied by base_power in NATURAL_UNITS)
         discharge_efficiency=efficiency_dispatch,
         storage_technology_type=StorageTechs.LIB,
         prime_mover_type=PrimeMoversType.BA,
-        storage_capacity=storage_capacity,
+        storage_capacity=storage_capacity / base_power,  # per-unit (will be multiplied by base_power in NATURAL_UNITS)
     )
 
     # Set operational cost
@@ -705,8 +754,11 @@ def _(
         logger.warning(f"Could not find bus {bus_name} for store {component.name}")
         return
 
-    # Get store parameters
+    # Get store parameters (energy-side data)
     e_nom = get_pypsa_property(pypsa_system, component, "e_nom") or 0.0
+    e_initial = get_pypsa_property(pypsa_system, component, "e_initial") or 0.0
+    e_cyclic = get_pypsa_property(pypsa_system, component, "e_cyclic") or False
+    e_cyclic_per_period = get_pypsa_property(pypsa_system, component, "e_cyclic_per_period") or False
     marginal_cost = get_pypsa_property(pypsa_system, component, "marginal_cost") or 0.0
     standing_loss = get_pypsa_property(pypsa_system, component, "standing_loss") or 0.0
     carrier = get_pypsa_property(pypsa_system, component, "carrier")
@@ -715,32 +767,106 @@ def _(
         logger.warning(f"Store {component.name} has invalid energy capacity")
         return
 
-    # Create the energy reservoir storage
-    # For stores, we assume 1-hour charge/discharge rate
-    p_nom = e_nom  # Assume 1-hour discharge rate
-    efficiency = 1.0 - standing_loss  # Convert standing loss to efficiency
+    # Check for corresponding StorageUnit (power-side data)
+    # Store owns the energy buffer (e_nom), StorageUnit owns the power converter (p_nom, efficiencies)
+    p_nom = e_nom  # Default: assume 1-hour discharge rate
+    efficiency_store = 1.0
+    efficiency_dispatch = 1.0
+    storage_unit = None
     
-    # Calculate base_power and per-unit limits
-    base_power = max(p_nom, 0.001)
-    # Power limits should be in per-unit (like rating)
-    # When get_value() is called with Val(:mva), it multiplies by base_power to convert to MW
-    # So max should be 1.0 (per-unit) to match rating
-    max_power_pu = 1.0  # Per-unit (nameplate capacity)
+    try:
+        storage_unit = pypsa_system.get_component(PypsaStorageUnit, component.name)
+        if storage_unit:
+            # Use StorageUnit's power-side data
+            p_nom = get_pypsa_property(pypsa_system, storage_unit, "p_nom") or e_nom
+            efficiency_store = get_pypsa_property(pypsa_system, storage_unit, "efficiency_store") or 1.0
+            efficiency_dispatch = get_pypsa_property(pypsa_system, storage_unit, "efficiency_dispatch") or 1.0
+            logger.debug(
+                f"Store {component.name} has corresponding StorageUnit, "
+                f"using StorageUnit's p_nom={p_nom:.2f} MW, "
+                f"efficiency_store={efficiency_store:.4f}, efficiency_dispatch={efficiency_dispatch:.4f}"
+            )
+    except Exception:
+        # No corresponding StorageUnit, use defaults
+        efficiency_store = 1.0 - standing_loss  # Convert standing loss to efficiency
+        efficiency_dispatch = 1.0 - standing_loss
+    
+    # Calculate base_power and rating
+    base_power = 100.0
+    rating_pu = p_nom / base_power
+
+    # Get initial state of charge from Store (energy-side data)
+    # Priority: e_set time series > e_initial > default based on cyclic flags
+    initial_storage_capacity_level = 0.0  # Default
+    e_set_prop = None
+    e_set_has_ts = False
+    
+    try:
+        if hasattr(component, 'e_set'):
+            e_set_prop = getattr(component, 'e_set')
+            if hasattr(e_set_prop, 'has_time_series') and e_set_prop.has_time_series():
+                e_set_ts = e_set_prop.get_time_series()
+                if e_set_ts is not None and len(e_set_ts) > 0:
+                    # Use first value from time series (in MWh)
+                    initial_energy = float(e_set_ts.iloc[0])
+                    if not pd.isna(initial_energy) and initial_energy >= 0:
+                        initial_storage_capacity_level = initial_energy / e_nom if e_nom > 0 else 0.0
+                        e_set_has_ts = True
+                        logger.debug(
+                            f"Store {component.name} using first value from e_set time series: "
+                            f"{initial_energy:.2f} MWh ({initial_storage_capacity_level*100:.1f}% of capacity)"
+                        )
+    except Exception as e:
+        logger.debug(f"Could not get e_set time series for {component.name}: {e}")
+    
+    # If no e_set time series, use e_initial or default based on cyclic flags
+    if not e_set_has_ts:
+        if e_cyclic or e_cyclic_per_period:
+            # For cyclic storage, PyPSA optimizes initial = final.
+            # Still use e_initial if it's set, otherwise default to 50%
+            if e_initial > 0 and e_nom > 0:
+                initial_storage_capacity_level = e_initial / e_nom
+                logger.debug(
+                    f"Store {component.name} has e_cyclic={e_cyclic} or e_cyclic_per_period={e_cyclic_per_period}, "
+                    f"using e_initial={e_initial:.2f} MWh ({initial_storage_capacity_level*100:.1f}% of capacity)"
+                )
+            else:
+                initial_storage_capacity_level = 0.0
+                logger.debug(
+                    f"Store {component.name} has e_cyclic={e_cyclic} or e_cyclic_per_period={e_cyclic_per_period}, "
+                    f"no e_initial set, using default initial SOC of 0%"
+                )
+        else:
+            # For non-cyclic, use e_initial
+            initial_storage_capacity_level = e_initial / e_nom if e_nom > 0 else 0.0
+            logger.debug(
+                f"Store {component.name} (non-cyclic) using e_initial={e_initial:.2f} MWh "
+                f"({initial_storage_capacity_level*100:.1f}% of capacity)"
+            )
+
+    # IMPORTANT: Power limits must be in per-unit (relative to base_power) for PowerSystems.jl
+    # PowerSystems.jl's get_input_active_power_limits() and get_output_active_power_limits()
+    # multiply by base_power when NATURAL_UNITS is set, so we must set them in per-unit here.
+    # Use StorageUnit's efficiencies if available, otherwise use Store's standing_loss
+    efficiency = InputOutput(
+        input=efficiency_store,
+        output=efficiency_dispatch
+    )
     
     store = EnergyReservoirStorage(
         uuid=component.uuid,
         name=component.name,
         bus=psy_bus,
         base_power=base_power,
-        rating=1.0,  # Per-unit rating (1.0 = nameplate capacity)
-        initial_storage_capacity_level=0.5,  # Default to 50% initial charge
-        efficiency=InputOutput(input=efficiency, output=efficiency),
-        input_active_power_limits=MinMax(min=0, max=max_power_pu),  # Per-unit
-        output_active_power_limits=MinMax(min=0, max=max_power_pu),  # Per-unit
-        discharge_efficiency=efficiency,
-        storage_technology_type=StorageTechs.LIB,  # Default to lithium-ion battery
+        rating=rating_pu,
+        initial_storage_capacity_level=initial_storage_capacity_level,
+        efficiency=efficiency,
+        input_active_power_limits=MinMax(min=0.0, max=p_nom / base_power),   # per-unit (will be multiplied by base_power in NATURAL_UNITS)
+        output_active_power_limits=MinMax(min=0.0, max=p_nom / base_power),  # per-unit (will be multiplied by base_power in NATURAL_UNITS)
+        discharge_efficiency=efficiency_dispatch,
+        storage_technology_type=StorageTechs.LIB,
         prime_mover_type=PrimeMoversType.BA,
-        storage_capacity=e_nom,
+        storage_capacity=e_nom / base_power,  # per-unit (will be multiplied by base_power in NATURAL_UNITS)
     )
     store.services = []
     psy_system.add_component(store)
@@ -753,7 +879,7 @@ def _(
     #     
     #     store.operation_cost = create_operational_cost(store, component, pypsa_system)
 
-    # Add time series if they exist - extract from PypsaProperty
+    # Add time series from Store (energy-side): e_set, marginal_cost
     for property_name in ["e_set", "marginal_cost"]:
         if hasattr(component, property_name):
             prop = getattr(component, property_name)
@@ -767,6 +893,24 @@ def _(
                     continue
                 psy_system.add_time_series(ts, store)
                 logger.debug(f"Added {property_name} time series for store {component.name}")
+
+    # Add time series from StorageUnit (power-side): p_max_pu, p_min_pu, inflow
+    if storage_unit:
+        for property_name in ["p_max_pu", "p_min_pu", "inflow"]:
+            if hasattr(storage_unit, property_name):
+                prop = getattr(storage_unit, property_name)
+                if hasattr(prop, "has_time_series") and prop.has_time_series():
+                    ts_data = prop.get_time_series()
+                    if property_name == "p_max_pu":
+                        ts = create_single_time_series_from_pandas(ts_data, "max_active_power")
+                    elif property_name == "p_min_pu":
+                        ts = create_single_time_series_from_pandas(ts_data, "min_active_power")
+                    elif property_name == "inflow":
+                        ts = create_single_time_series_from_pandas(ts_data, "inflow")
+                    else:
+                        continue
+                    psy_system.add_time_series(ts, store)
+                    logger.debug(f"Added {property_name} time series from StorageUnit for store {component.name}")
 
 
 @pypsa_component_to_psy.register

@@ -217,6 +217,51 @@ def map_sienna_to_pypsa_carrier(sienna_carrier):
     return sienna_carrier
 
 
+def order_carriers_by_marginal_cost(carriers):
+    """Order carriers by typical marginal cost (lowest first).
+    
+    Typical order (bottom to top in dispatch plot):
+    1. Renewables (solar, wind, hydro) - ~0 $/MWh
+    2. Nuclear - ~0-5 $/MWh
+    3. Batteries - variable, but typically after renewables
+    4. Thermal (gas, coal, oil) - higher costs
+    
+    Parameters:
+        carriers: List or set of carrier names
+        
+    Returns:
+        List of carriers ordered by typical marginal cost (ascending)
+    """
+    # Define typical marginal cost order (lower number = lower cost, appears at bottom)
+    cost_order = {
+        # Renewables - lowest cost, bottom of stack
+        'solar': 1,
+        'onwind': 2,
+        'offwind': 3,
+        'wind': 2,  # Alias for onwind
+        'hydro': 4,
+        # Nuclear - very low cost, after renewables
+        'nuclear': 5,
+        # Batteries - after renewables but before thermal
+        'battery': 6,
+        'pumped_hydro': 7,
+        # Thermal - higher costs, top of stack
+        'gas': 8,
+        'coal': 9,
+        'oil': 10,
+        'biomass': 11,
+        'waste': 12,
+        'geothermal': 13,
+        'other': 14,
+    }
+    
+    # Sort carriers by cost order, then alphabetically for ties
+    def get_order(carrier):
+        return (cost_order.get(carrier.lower(), 999), carrier.lower())
+    
+    return sorted(carriers, key=get_order)
+
+
 def plot_side_by_side_energy_balance(pypsa_df, sienna_df, carrier_colors, timesteps=168, output_file=None):
     """Create side-by-side energy balance plots.
     
@@ -349,7 +394,8 @@ def plot_side_by_side_energy_balance(pypsa_df, sienna_df, carrier_colors, timest
     sienna_neg = sienna_balance.clip(upper=0)
     
     # Get all unique generator carriers from both datasets
-    all_carriers = sorted(set(pypsa_balance.columns) | set(sienna_balance.columns))
+    # Order by typical marginal cost (lowest first, appears at bottom of stack)
+    all_carriers = order_carriers_by_marginal_cost(set(pypsa_balance.columns) | set(sienna_balance.columns))
     
     # Ensure both DataFrames have the same columns (fill missing with 0)
     for carrier in all_carriers:
