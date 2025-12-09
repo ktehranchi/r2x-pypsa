@@ -102,6 +102,14 @@ def _(
                 value_curve=LinearCurve(0.0),
                 power_units=UnitSystem.NATURAL_UNITS
             )
+        
+        # Warn if quadratic cost is present but not used
+        if marginal_cost_quadratic is not None and marginal_cost_quadratic != 0.0:
+            logger.warning(
+                f"Generator {pypsa_component.name} has marginal_cost_quadratic={marginal_cost_quadratic}, "
+                f"but quadratic costs are not supported in the Python infrasys package. "
+                f"Using only linear cost (marginal_cost={marginal_cost})."
+            )
 
         return ThermalGenerationCost(
             fixed=0.0,  # PyPSA doesn't have fixed cost concept

@@ -376,9 +376,10 @@ class PypsaGenerator(Component):
             # Check time series values - clamp to [0, 1] range
             if v.time_series is not None and not v.time_series.empty:
                 # Clip to [0, 1] range and fill NaN with 0
-                # Check if any values exceed 1.0 before clipping
+                # Check if any values significantly exceed 1.0 before clipping (ignore floating point precision)
                 max_val = v.time_series.max()
-                if max_val > 1.0:
+                # Only log if value is meaningfully > 1.0 (not just floating point precision issues)
+                if max_val > 1.001:  # Tolerance of 0.001 to avoid false positives from floating point precision
                     # Log warning for debugging
                     from loguru import logger
                     logger.debug(f"p_max_pu time series has values > 1.0 (max={max_val:.3f}), clamping to 1.0")

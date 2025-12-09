@@ -21,6 +21,7 @@ from r2x.models import (
     RenewableDispatch,
     RenewableNonDispatch,
     ThermalStandard,
+    UpDown,
 )
 from r2x.units import Voltage
 
@@ -366,6 +367,30 @@ def _(
             p_min_pu * p_nom, p_max_pu * p_nom, 100.0  # Use base_power (100.0) instead of p_nom
         )
 
+    # Set ramping limits (convert from PyPSA per-unit per hour to Sienna MW/min)
+    # PyPSA: ramp_limit_up/down are per-unit per hour (e.g., 1.0 = 100% of p_nom per hour)
+    # Sienna: ramp_limits are in MW/min
+    # Conversion: (ramp_limit * p_nom) / 60.0 minutes per hour
+    ramp_limit_up = get_pypsa_property(pypsa_system, component, "ramp_limit_up")
+    ramp_limit_down = get_pypsa_property(pypsa_system, component, "ramp_limit_down")
+    
+    # Check if ramping limits are valid (not None and not NaN)
+    if (ramp_limit_up is not None and not pd.isna(ramp_limit_up) and 
+        ramp_limit_down is not None and not pd.isna(ramp_limit_down)):
+        # Convert from per-unit per hour to MW/min
+        ramp_up_mw_per_min = (float(ramp_limit_up) * p_nom) / 60.0
+        ramp_down_mw_per_min = (float(ramp_limit_down) * p_nom) / 60.0
+        generator.ramp_limits = UpDown(up=ramp_up_mw_per_min, down=ramp_down_mw_per_min)
+        logger.debug(
+            f"Set ramping limits for {component.name}: "
+            f"up={ramp_up_mw_per_min:.2f} MW/min, down={ramp_down_mw_per_min:.2f} MW/min "
+            f"(from PyPSA: up={ramp_limit_up:.2f} pu/h, down={ramp_limit_down:.2f} pu/h)"
+        )
+    else:
+        # No ramping limits (NaN for renewables, or missing)
+        generator.ramp_limits = None
+        logger.debug(f"Generator {component.name} has no ramping limits (ramp_limit_up={ramp_limit_up}, ramp_limit_down={ramp_limit_down})")
+
     generator.services = []
     psy_system.add_component(generator)
 
@@ -695,6 +720,16 @@ def _(
     # IMPORTANT: Power limits must be in per-unit (relative to base_power) for PowerSystems.jl
     # PowerSystems.jl's get_input_active_power_limits() and get_output_active_power_limits()
     # multiply by base_power when NATURAL_UNITS is set, so we must set them in per-unit here.
+    
+    # Set storage_target for cyclic storage: if cyclic_state_of_charge_per_period is True,
+    # set storage_target = initial_storage_capacity_level to enforce initial = final SOC
+    storage_target = initial_storage_capacity_level if cyclic_state_of_charge_per_period else 0.0
+    if cyclic_state_of_charge_per_period and storage_target > 0:
+        logger.debug(
+            f"Storage {component.name} has cyclic_state_of_charge_per_period=True, "
+            f"setting storage_target={storage_target:.4f} to enforce initial = final SOC"
+        )
+    
     battery = EnergyReservoirStorage(
         uuid=component.uuid,
         name=component.name,
@@ -709,6 +744,7 @@ def _(
         storage_technology_type=StorageTechs.LIB,
         prime_mover_type=PrimeMoversType.BA,
         storage_capacity=storage_capacity / base_power,  # per-unit (will be multiplied by base_power in NATURAL_UNITS)
+        storage_target=storage_target,  # Set to initial_storage_capacity_level for cyclic storage (enforces initial = final)
     )
 
     # Set operational cost
@@ -778,7 +814,14 @@ def _(
         storage_unit = pypsa_system.get_component(PypsaStorageUnit, component.name)
         if storage_unit:
             # Use StorageUnit's power-side data
-            p_nom = get_pypsa_property(pypsa_system, storage_unit, "p_nom") or e_nom
+            p_nom = get_pypsa_property(pypsa_system, storage_unit, "p_nom") or 0.0
+            # If StorageUnit has p_nom=0, skip this Store (can't charge/discharge, not dispatchable)
+            if p_nom <= 0:
+                logger.debug(
+                    f"Store {component.name} has corresponding StorageUnit with p_nom={p_nom:.2f} MW, "
+                    f"skipping Store conversion (no power capacity for dispatch)"
+                )
+                return
             efficiency_store = get_pypsa_property(pypsa_system, storage_unit, "efficiency_store") or 1.0
             efficiency_dispatch = get_pypsa_property(pypsa_system, storage_unit, "efficiency_dispatch") or 1.0
             logger.debug(
@@ -853,6 +896,15 @@ def _(
         output=efficiency_dispatch
     )
     
+    # Set storage_target for cyclic storage: if e_cyclic or e_cyclic_per_period is True,
+    # set storage_target = initial_storage_capacity_level to enforce initial = final SOC
+    storage_target = initial_storage_capacity_level if (e_cyclic or e_cyclic_per_period) else 0.0
+    if (e_cyclic or e_cyclic_per_period) and storage_target > 0:
+        logger.debug(
+            f"Store {component.name} has e_cyclic={e_cyclic} or e_cyclic_per_period={e_cyclic_per_period}, "
+            f"setting storage_target={storage_target:.4f} to enforce initial = final SOC"
+        )
+    
     store = EnergyReservoirStorage(
         uuid=component.uuid,
         name=component.name,
@@ -867,6 +919,7 @@ def _(
         storage_technology_type=StorageTechs.LIB,
         prime_mover_type=PrimeMoversType.BA,
         storage_capacity=e_nom / base_power,  # per-unit (will be multiplied by base_power in NATURAL_UNITS)
+        storage_target=storage_target,  # Set to initial_storage_capacity_level for cyclic storage (enforces initial = final)
     )
     store.services = []
     psy_system.add_component(store)

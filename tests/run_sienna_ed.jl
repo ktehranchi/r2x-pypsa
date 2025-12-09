@@ -386,19 +386,18 @@ else
     # using "active_power" may be causing scaling issues. Reverting to default to test.
     set_device_model!(template, PowerLoad, StaticPowerLoad)
 
-    # Set storage device model
+    # Check for storage units (will be dispatched if present in system)
     if !isempty(collect(get_components(EnergyReservoirStorage, sys)))
         if has_storage_pkg
             try
                 # Use StorageDispatchWithReserves from StorageSystemsSimulations.jl
-                # Note: energy_target is disabled - storage_target not currently used
                 storage_model = DeviceModel(
                     EnergyReservoirStorage,
                     StorageSystemsSimulations.StorageDispatchWithReserves;
                     attributes = Dict{String, Any}(
-                        "reservation" => true,  # Enable binary variable to enforce mutual exclusivity (charge/discharge)
+                        "reservation" => false,
                         "cycling_limits" => false,
-                        "energy_target" => false,  # Disabled - storage_target not currently used
+                        "energy_target" => false,
                         "complete_coverage" => false,
                         "regularization" => false,
                     ),
@@ -1063,399 +1062,6 @@ catch e
     end
 end
 
-println("="^80)
-
-# Validate wind resources at first timestep
-println("\n" * "="^80)
-println("VALIDATING WIND RESOURCES AT FIRST TIMESTEP")
-println("="^80)
-try
-    # Get all wind generators
-    wind_gens = [g for g in collect(get_components(RenewableDispatch, sys)) 
-                 if get_prime_mover_type(g) in [PrimeMovers.WT, PrimeMovers.WS]]
-    
-    println("\nWind generators found: $(length(wind_gens))")
-    
-    if !isempty(wind_gens)
-        # Calculate total wind capacity
-        total_wind_capacity = sum(get_max_active_power(g) for g in wind_gens)
-        println("Total wind capacity: $(@sprintf("%.2f", total_wind_capacity)) MW")
-        
-        # Get time series for first timestep (index 1, which is the first hour)
-        total_wind_upper_bound = 0.0
-        wind_details = []
-        
-        for gen in wind_gens
-            gen_name = get_name(gen)
-            max_power = get_max_active_power(gen)  # This is p_nom in MW
-            
-            # Get time series value at first timestep
-            try
-                # Match PowerSimulations: get raw per-unit values (ignore_scaling_factors=true)
-                # Then manually multiply by get_max_active_power() to match what PowerSimulations does
-                ts_data = get_time_series_array(DeterministicSingleTimeSeries, gen, "max_active_power"; ignore_scaling_factors=true)
-                if ts_data !== nothing && length(ts_data) > 0
-                    # Time series values are in per-unit (0-1) when ignore_scaling_factors=true
-                    ts_values = TimeSeries.values(ts_data)
-                    ts_value_ts1_pu = ts_values[1]  # First timestep (per-unit 0-1)
-                    
-                    # Upper bound = ts_value_pu * get_max_active_power() (matches PowerSimulations)
-                    upper_bound_mw = ts_value_ts1_pu * max_power
-                    total_wind_upper_bound += upper_bound_mw
-                    
-                    # Per-unit value for display
-                    ts_value_pu = ts_value_ts1_pu
-                    
-                    push!(wind_details, (
-                        name = gen_name,
-                        capacity_mw = max_power,
-                        ts_value_pu = ts_value_pu,
-                        upper_bound_mw = upper_bound_mw
-                    ))
-                else
-                    # No time series - use max capacity as upper bound
-                    total_wind_upper_bound += max_power
-                    push!(wind_details, (
-                        name = gen_name,
-                        capacity_mw = max_power,
-                        ts_value_pu = 1.0,
-                        upper_bound_mw = max_power
-                    ))
-                end
-            catch e
-                println("  WARNING: Could not get time series for $gen_name: $e")
-                # Fallback: use max capacity
-                total_wind_upper_bound += max_power
-                push!(wind_details, (
-                    name = gen_name,
-                    capacity_mw = max_power,
-                    ts_value_pu = 1.0,
-                    upper_bound_mw = max_power
-                ))
-            end
-        end
-        
-        println("\nWind upper bound at first timestep: $(@sprintf("%.2f", total_wind_upper_bound)) MW")
-        println("  (This is the constraint: p_{d,t}^re ≤ ActivePowerTimeSeriesParameter_t)")
-        println("  (TS values are per-unit 0-1, multiplied by get_max_active_power() to match PowerSimulations)")
-        
-        # Show top 10 generators by upper bound
-        if length(wind_details) > 0
-            sort!(wind_details, by=x -> x.upper_bound_mw, rev=true)
-            println("\nTop 10 wind generators at first timestep:")
-            println("  " * lpad("Name", 40) * lpad("Capacity (MW)", 15) * lpad("TS (pu)", 12) * lpad("Upper Bound (MW)", 18))
-            println("  " * "-"^85)
-            for (i, detail) in enumerate(wind_details[1:min(10, length(wind_details))])
-                println("  " * lpad(detail.name, 40) * lpad(@sprintf("%.2f", detail.capacity_mw), 15) * 
-                        lpad(@sprintf("%.4f", detail.ts_value_pu), 12) * lpad(@sprintf("%.2f", detail.upper_bound_mw), 18))
-            end
-        end
-        
-        # Read PyPSA wind total from the test output if available
-        pypsa_wind_file = joinpath(@__DIR__, "test_output", "pypsa_dispatch.csv")
-        if isfile(pypsa_wind_file)
-            try
-                pypsa_df = CSV.read(pypsa_wind_file, DataFrame)
-                # Filter for wind carriers at first timestep
-                wind_carriers = ["onwind", "offwind", "offwind_floating", "wind"]
-                first_ts = first(unique(pypsa_df.DateTime))
-                wind_rows = filter(row -> row.carrier in wind_carriers && row.DateTime == first_ts, pypsa_df)
-                pypsa_wind_total = sum(wind_rows.value)
-                
-                println("\n" * "-"^80)
-                println("COMPARISON WITH PyPSA:")
-                println("  Sienna wind upper bound (TS1): $(@sprintf("%.2f", total_wind_upper_bound)) MW")
-                println("  PyPSA wind generation (TS1): $(@sprintf("%.2f", pypsa_wind_total)) MW")
-                diff = abs(total_wind_upper_bound - pypsa_wind_total)
-                diff_pct = (diff / max(pypsa_wind_total, 1.0)) * 100.0
-                println("  Difference: $(@sprintf("%.2f", diff)) MW ($(@sprintf("%.2f", diff_pct))%)")
-                
-                if diff > 0.01
-                    println("  ⚠️  WARNING: Mismatch detected! This may cause infeasibility.")
-                else
-                    println("  ✓ Match within tolerance (0.01 MW)")
-                end
-            catch e
-                println("\n  Could not read PyPSA dispatch file for comparison: $e")
-            end
-        else
-            println("\n  (PyPSA dispatch file not found for comparison)")
-        end
-    else
-        println("  No wind generators found in system")
-    end
-    
-catch e
-    println("ERROR: Could not validate wind resources: $e")
-    println("  Stacktrace:")
-    for (exc, bt) in Base.catch_stack()
-        showerror(stdout, exc, bt)
-        println()
-    end
-end
-
-println("="^80)
-
-# Validate solar resources at first timestep
-println("\n" * "="^80)
-println("VALIDATING SOLAR RESOURCES AT FIRST TIMESTEP")
-println("="^80)
-try
-    # Get all solar generators
-    solar_gens = [g for g in collect(get_components(RenewableDispatch, sys)) 
-                  if get_prime_mover_type(g) == PrimeMovers.PVe]
-    
-    println("\nSolar generators found: $(length(solar_gens))")
-    
-    if !isempty(solar_gens)
-        # Calculate total solar capacity
-        total_solar_capacity = sum(get_max_active_power(g) for g in solar_gens)
-        println("Total solar capacity: $(@sprintf("%.2f", total_solar_capacity)) MW")
-        
-        # Get time series for first timestep (index 1, which is the first hour)
-        total_solar_upper_bound = 0.0
-        solar_details = []
-        
-        for gen in solar_gens
-            gen_name = get_name(gen)
-            max_power = get_max_active_power(gen)  # This is p_nom in MW
-            
-            # Get time series value at first timestep
-            try
-                # Match PowerSimulations: get raw per-unit values (ignore_scaling_factors=true)
-                # Then manually multiply by get_max_active_power() to match what PowerSimulations does
-                ts_data = get_time_series_array(DeterministicSingleTimeSeries, gen, "max_active_power"; ignore_scaling_factors=true)
-                if ts_data !== nothing && length(ts_data) > 0
-                    # Time series values are in per-unit (0-1) when ignore_scaling_factors=true
-                    ts_values = TimeSeries.values(ts_data)
-                    ts_value_ts1_pu = ts_values[1]  # First timestep (per-unit 0-1)
-                    
-                    # Upper bound = ts_value_pu * get_max_active_power() (matches PowerSimulations)
-                    upper_bound_mw = ts_value_ts1_pu * max_power
-                    total_solar_upper_bound += upper_bound_mw
-                    
-                    # Per-unit value for display
-                    ts_value_pu = ts_value_ts1_pu
-                    
-                    push!(solar_details, (
-                        name = gen_name,
-                        capacity_mw = max_power,
-                        ts_value_pu = ts_value_pu,
-                        upper_bound_mw = upper_bound_mw
-                    ))
-                else
-                    # No time series - use max capacity as upper bound
-                    total_solar_upper_bound += max_power
-                    push!(solar_details, (
-                        name = gen_name,
-                        capacity_mw = max_power,
-                        ts_value_pu = 1.0,
-                        upper_bound_mw = max_power
-                    ))
-                end
-            catch e
-                println("  WARNING: Could not get time series for $gen_name: $e")
-                # Fallback: use max capacity
-                total_solar_upper_bound += max_power
-                push!(solar_details, (
-                    name = gen_name,
-                    capacity_mw = max_power,
-                    ts_value_pu = 1.0,
-                    upper_bound_mw = max_power
-                ))
-            end
-        end
-        
-        println("\nSolar upper bound at first timestep: $(@sprintf("%.2f", total_solar_upper_bound)) MW")
-        println("  (This is the constraint: p_{d,t}^re ≤ ActivePowerTimeSeriesParameter_t)")
-        println("  (TS values are per-unit 0-1, multiplied by get_max_active_power() to match PowerSimulations)")
-        
-        # Show top 10 generators by upper bound
-        if length(solar_details) > 0
-            sort!(solar_details, by=x -> x.upper_bound_mw, rev=true)
-            println("\nTop 10 solar generators at first timestep:")
-            println("  " * lpad("Name", 40) * lpad("Capacity (MW)", 15) * lpad("TS (pu)", 12) * lpad("Upper Bound (MW)", 18))
-            println("  " * "-"^85)
-            for (i, detail) in enumerate(solar_details[1:min(10, length(solar_details))])
-                println("  " * lpad(detail.name, 40) * lpad(@sprintf("%.2f", detail.capacity_mw), 15) * 
-                        lpad(@sprintf("%.4f", detail.ts_value_pu), 12) * lpad(@sprintf("%.2f", detail.upper_bound_mw), 18))
-            end
-        end
-        
-        # Read PyPSA solar total from the test output if available
-        pypsa_wind_file = joinpath(@__DIR__, "test_output", "pypsa_dispatch.csv")
-        if isfile(pypsa_wind_file)
-            try
-                pypsa_df = CSV.read(pypsa_wind_file, DataFrame)
-                # Filter for solar carriers at first timestep
-                solar_carriers = ["solar"]
-                first_ts = first(unique(pypsa_df.DateTime))
-                solar_rows = filter(row -> row.carrier in solar_carriers && row.DateTime == first_ts, pypsa_df)
-                pypsa_solar_total = sum(solar_rows.value)
-                
-                println("\n" * "-"^80)
-                println("COMPARISON WITH PyPSA:")
-                println("  Sienna solar upper bound (TS1): $(@sprintf("%.2f", total_solar_upper_bound)) MW")
-                println("  PyPSA solar generation (TS1): $(@sprintf("%.2f", pypsa_solar_total)) MW")
-                diff = abs(total_solar_upper_bound - pypsa_solar_total)
-                diff_pct = (diff / max(pypsa_solar_total, 1.0)) * 100.0
-                println("  Difference: $(@sprintf("%.2f", diff)) MW ($(@sprintf("%.2f", diff_pct))%)")
-                
-                if diff > 0.01
-                    println("  ⚠️  WARNING: Mismatch detected! This may cause infeasibility.")
-                else
-                    println("  ✓ Match within tolerance (0.01 MW)")
-                end
-            catch e
-                println("\n  Could not read PyPSA dispatch file for comparison: $e")
-            end
-        else
-            println("\n  (PyPSA dispatch file not found for comparison)")
-        end
-    else
-        println("  No solar generators found in system")
-    end
-    
-catch e
-    println("ERROR: Could not validate solar resources: $e")
-    println("  Stacktrace:")
-    for (exc, bt) in Base.catch_stack()
-        showerror(stdout, exc, bt)
-        println()
-    end
-end
-
-println("="^80)
-
-# Validate hydro resources at first timestep
-println("\n" * "="^80)
-println("VALIDATING HYDRO RESOURCES AT FIRST TIMESTEP")
-println("="^80)
-try
-    # Get all hydro generators
-    hydro_gens = [g for g in collect(get_components(RenewableDispatch, sys)) 
-                  if get_prime_mover_type(g) == PrimeMovers.HY]
-    
-    println("\nHydro generators found: $(length(hydro_gens))")
-    
-    if !isempty(hydro_gens)
-        # Calculate total hydro capacity
-        total_hydro_capacity = sum(get_max_active_power(g) for g in hydro_gens)
-        println("Total hydro capacity: $(@sprintf("%.2f", total_hydro_capacity)) MW")
-        
-        # Get time series for first timestep (index 1, which is the first hour)
-        total_hydro_upper_bound = 0.0
-        hydro_details = []
-        
-        for gen in hydro_gens
-            gen_name = get_name(gen)
-            max_power = get_max_active_power(gen)  # This is p_nom in MW
-            
-            # Get time series value at first timestep
-            try
-                # Match PowerSimulations: get raw per-unit values (ignore_scaling_factors=true)
-                # Then manually multiply by get_max_active_power() to match what PowerSimulations does
-                ts_data = get_time_series_array(DeterministicSingleTimeSeries, gen, "max_active_power"; ignore_scaling_factors=true)
-                if ts_data !== nothing && length(ts_data) > 0
-                    # Time series values are in per-unit (0-1) when ignore_scaling_factors=true
-                    ts_values = TimeSeries.values(ts_data)
-                    ts_value_ts1_pu = ts_values[1]  # First timestep (per-unit 0-1)
-                    
-                    # Upper bound = ts_value_pu * get_max_active_power() (matches PowerSimulations)
-                    upper_bound_mw = ts_value_ts1_pu * max_power
-                    total_hydro_upper_bound += upper_bound_mw
-                    
-                    # Per-unit value for display
-                    ts_value_pu = ts_value_ts1_pu
-                    
-                    push!(hydro_details, (
-                        name = gen_name,
-                        capacity_mw = max_power,
-                        ts_value_pu = ts_value_pu,
-                        upper_bound_mw = upper_bound_mw
-                    ))
-                else
-                    # No time series - use max capacity as upper bound
-                    total_hydro_upper_bound += max_power
-                    push!(hydro_details, (
-                        name = gen_name,
-                        capacity_mw = max_power,
-                        ts_value_pu = 1.0,
-                        upper_bound_mw = max_power
-                    ))
-                end
-            catch e
-                println("  WARNING: Could not get time series for $gen_name: $e")
-                # Fallback: use max capacity
-                total_hydro_upper_bound += max_power
-                push!(hydro_details, (
-                    name = gen_name,
-                    capacity_mw = max_power,
-                    ts_value_pu = 1.0,
-                    upper_bound_mw = max_power
-                ))
-            end
-        end
-        
-        println("\nHydro upper bound at first timestep: $(@sprintf("%.2f", total_hydro_upper_bound)) MW")
-        println("  (This is the constraint: p_{d,t}^re ≤ ActivePowerTimeSeriesParameter_t)")
-        println("  (TS values are per-unit 0-1, multiplied by get_max_active_power() to match PowerSimulations)")
-        
-        # Show top 10 generators by upper bound
-        if length(hydro_details) > 0
-            sort!(hydro_details, by=x -> x.upper_bound_mw, rev=true)
-            println("\nTop 10 hydro generators at first timestep:")
-            println("  " * lpad("Name", 40) * lpad("Capacity (MW)", 15) * lpad("TS (pu)", 12) * lpad("Upper Bound (MW)", 18))
-            println("  " * "-"^85)
-            for (i, detail) in enumerate(hydro_details[1:min(10, length(hydro_details))])
-                println("  " * lpad(detail.name, 40) * lpad(@sprintf("%.2f", detail.capacity_mw), 15) * 
-                        lpad(@sprintf("%.4f", detail.ts_value_pu), 12) * lpad(@sprintf("%.2f", detail.upper_bound_mw), 18))
-            end
-        end
-        
-        # Read PyPSA hydro total from the test output if available
-        pypsa_wind_file = joinpath(@__DIR__, "test_output", "pypsa_dispatch.csv")
-        if isfile(pypsa_wind_file)
-            try
-                pypsa_df = CSV.read(pypsa_wind_file, DataFrame)
-                # Filter for hydro carriers at first timestep
-                hydro_carriers = ["hydro", "ror"]
-                first_ts = first(unique(pypsa_df.DateTime))
-                hydro_rows = filter(row -> row.carrier in hydro_carriers && row.DateTime == first_ts, pypsa_df)
-                pypsa_hydro_total = sum(hydro_rows.value)
-                
-                println("\n" * "-"^80)
-                println("COMPARISON WITH PyPSA:")
-                println("  Sienna hydro upper bound (TS1): $(@sprintf("%.2f", total_hydro_upper_bound)) MW")
-                println("  PyPSA hydro generation (TS1): $(@sprintf("%.2f", pypsa_hydro_total)) MW")
-                diff = abs(total_hydro_upper_bound - pypsa_hydro_total)
-                diff_pct = (diff / max(pypsa_hydro_total, 1.0)) * 100.0
-                println("  Difference: $(@sprintf("%.2f", diff)) MW ($(@sprintf("%.2f", diff_pct))%)")
-                
-                if diff > 0.01
-                    println("  ⚠️  WARNING: Mismatch detected! This may cause infeasibility.")
-                else
-                    println("  ✓ Match within tolerance (0.01 MW)")
-                end
-            catch e
-                println("\n  Could not read PyPSA dispatch file for comparison: $e")
-            end
-        else
-            println("\n  (PyPSA dispatch file not found for comparison)")
-        end
-    else
-        println("  No hydro generators found in system")
-    end
-    
-catch e
-    println("ERROR: Could not validate hydro resources: $e")
-    println("  Stacktrace:")
-    for (exc, bt) in Base.catch_stack()
-        showerror(stdout, exc, bt)
-        println()
-    end
-end
-
 # Validate storage resources at first timestep
 println("\n" * "="^80)
 println("VALIDATING STORAGE RESOURCES AT FIRST TIMESTEP")
@@ -1624,6 +1230,9 @@ model = DecisionModel(
         Gurobi.Optimizer, 
         "OutputFlag" => 1,  # Enable output to see infeasibility details
         "LogToConsole" => 1,
+        "OptimalityTol" => 1e-9,  # Tight tolerance for better precision
+        "FeasibilityTol" => 1e-9,  # Tight tolerance for better precision
+        "IntFeasTol" => 1e-9,  # Tight tolerance for better precision
     ),
     system_to_file = false,
     resolution = Hour(1),  # Explicitly set resolution to Hour(1)
@@ -1915,7 +1524,7 @@ if objective !== nothing
     println("="^80)
     try
         # Get storage dispatch from optimization results
-        storage_units = collect(get_components(EnergyReservoirStorage, sys))
+        local storage_units = collect(get_components(EnergyReservoirStorage, sys))
         
         if !isempty(storage_units) && results !== nothing
             # Get first timestep
@@ -2259,11 +1868,11 @@ if objective !== nothing
             println("SUMMARY STATISTICS:")
             println("-"^80)
             if !isempty(hydro_summary)
-                total_capacity = sum(hydro_summary.capacity_mw)
-                total_ts_max = sum(hydro_summary.ts_max_mw)
-                total_sienna = sum(hydro_summary.sienna_total_mwh)
-                total_zero = sum(hydro_summary.zero_timesteps)
-                avg_utilization = isempty(hydro_summary.utilization_pct) ? 0.0 : mean(hydro_summary.utilization_pct)
+                local total_capacity = sum(hydro_summary.capacity_mw)
+                local total_ts_max = sum(hydro_summary.ts_max_mw)
+                local total_sienna = sum(hydro_summary.sienna_total_mwh)
+                local total_zero = sum(hydro_summary.zero_timesteps)
+                local avg_utilization = isempty(hydro_summary.utilization_pct) ? 0.0 : mean(hydro_summary.utilization_pct)
                 
                 println("Total Capacity: $(round(total_capacity, digits=2)) MW")
                 println("Total TS Max (sum of maxes): $(round(total_ts_max, digits=2)) MW")

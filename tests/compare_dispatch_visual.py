@@ -217,11 +217,474 @@ def map_sienna_to_pypsa_carrier(sienna_carrier):
     return sienna_carrier
 
 
+def compare_hourly_wind_dispatch(pypsa_df, sienna_df, timesteps=168):
+    """Compare hourly wind dispatch between PyPSA and Sienna to identify timestamp issues.
+    
+    Parameters:
+        pypsa_df: DataFrame with columns DateTime, carrier, value
+        sienna_df: DataFrame with columns DateTime, carrier, value
+        timesteps: Number of timesteps to compare (default: 168 for 1 week)
+    """
+    logger.info("=" * 80)
+    logger.info("HOURLY WIND DISPATCH COMPARISON")
+    logger.info("=" * 80)
+    
+    try:
+        # Filter wind data from PyPSA (onwind and offwind)
+        pypsa_wind = pypsa_df[pypsa_df['carrier'].isin(['onwind', 'offwind'])].copy()
+        # Filter wind data from Sienna (WT = wind turbine)
+        sienna_wind = sienna_df[sienna_df['carrier'] == 'WT'].copy()
+        
+        if len(pypsa_wind) == 0:
+            logger.warning("No PyPSA wind data found")
+            return
+        if len(sienna_wind) == 0:
+            logger.warning("No Sienna wind data found")
+            return
+        
+        # Aggregate by DateTime for each system
+        pypsa_wind_hourly = pypsa_wind.groupby('DateTime')['value'].sum().reset_index()
+        sienna_wind_hourly = sienna_wind.groupby('DateTime')['value'].sum().reset_index()
+        
+        # Sort by DateTime
+        pypsa_wind_hourly = pypsa_wind_hourly.sort_values('DateTime').reset_index(drop=True)
+        sienna_wind_hourly = sienna_wind_hourly.sort_values('DateTime').reset_index(drop=True)
+        
+        # Limit to specified timesteps
+        pypsa_wind_hourly = pypsa_wind_hourly.iloc[:timesteps]
+        sienna_wind_hourly = sienna_wind_hourly.iloc[:timesteps]
+        
+        logger.info(f"PyPSA wind records: {len(pypsa_wind_hourly)} timesteps")
+        logger.info(f"Sienna wind records: {len(sienna_wind_hourly)} timesteps")
+        
+        # Check timestamp alignment
+        pypsa_dates = set(pypsa_wind_hourly['DateTime'].dt.normalize())
+        sienna_dates = set(sienna_wind_hourly['DateTime'].dt.normalize())
+        common_dates = pypsa_dates & sienna_dates
+        
+        logger.info(f"PyPSA unique dates: {len(pypsa_dates)}")
+        logger.info(f"Sienna unique dates: {len(sienna_dates)}")
+        logger.info(f"Common dates: {len(common_dates)}")
+        
+        if len(common_dates) == 0:
+            logger.warning("⚠️  NO COMMON DATES FOUND - TIMESTAMP MISMATCH!")
+            logger.info(f"PyPSA date range: {pypsa_wind_hourly['DateTime'].min()} to {pypsa_wind_hourly['DateTime'].max()}")
+            logger.info(f"Sienna date range: {sienna_wind_hourly['DateTime'].min()} to {sienna_wind_hourly['DateTime'].max()}")
+            return
+        
+        # Try to align by index position (assuming same time period, just different timestamp formats)
+        logger.info("\n" + "-" * 80)
+        logger.info("COMPARING BY INDEX POSITION (assuming same time period)")
+        logger.info("-" * 80)
+        
+        min_len = min(len(pypsa_wind_hourly), len(sienna_wind_hourly))
+        mismatches = []
+        matches = []
+        
+        for i in range(min_len):
+            pypsa_val = pypsa_wind_hourly.iloc[i]['value']
+            sienna_val = sienna_wind_hourly.iloc[i]['value']
+            pypsa_ts = pypsa_wind_hourly.iloc[i]['DateTime']
+            sienna_ts = sienna_wind_hourly.iloc[i]['DateTime']
+            
+            diff = abs(pypsa_val - sienna_val)
+            diff_pct = (diff / max(abs(pypsa_val), 1.0)) * 100 if max(abs(pypsa_val), abs(sienna_val)) > 0.01 else 0.0
+            
+            # Check if timestamps match (within 1 hour)
+            ts_diff = abs((pypsa_ts - sienna_ts).total_seconds() / 3600)
+            
+            if diff > 0.01:  # More than 0.01 MW difference
+                mismatches.append({
+                    'index': i,
+                    'pypsa_ts': pypsa_ts,
+                    'sienna_ts': sienna_ts,
+                    'ts_diff_hours': ts_diff,
+                    'pypsa_val': pypsa_val,
+                    'sienna_val': sienna_val,
+                    'diff_mw': diff,
+                    'diff_pct': diff_pct
+                })
+            else:
+                matches.append(i)
+        
+        logger.info(f"Matches (diff <= 0.01 MW): {len(matches)}/{min_len} ({len(matches)/min_len*100:.1f}%)")
+        logger.info(f"Mismatches (diff > 0.01 MW): {len(mismatches)}/{min_len} ({len(mismatches)/min_len*100:.1f}%)")
+        
+        if len(mismatches) > 0:
+            logger.info("\n" + "-" * 80)
+            logger.info("TOP 20 MISMATCHES (by absolute difference):")
+            logger.info("-" * 80)
+            logger.info(f"{'Index':<8} {'PyPSA TS':<20} {'Sienna TS':<20} {'TS Diff':<10} {'PyPSA (MW)':<12} {'Sienna (MW)':<12} {'Diff (MW)':<12} {'Diff (%)':<10}")
+            logger.info("-" * 80)
+            
+            # Sort by absolute difference
+            mismatches_sorted = sorted(mismatches, key=lambda x: x['diff_mw'], reverse=True)
+            
+            for m in mismatches_sorted[:20]:
+                logger.info(
+                    f"{m['index']:<8} "
+                    f"{str(m['pypsa_ts']):<20} "
+                    f"{str(m['sienna_ts']):<20} "
+                    f"{m['ts_diff_hours']:<10.2f} "
+                    f"{m['pypsa_val']:<12.2f} "
+                    f"{m['sienna_val']:<12.2f} "
+                    f"{m['diff_mw']:<12.2f} "
+                    f"{m['diff_pct']:<10.2f}"
+                )
+            
+            # Check for timestamp misalignment patterns
+            logger.info("\n" + "-" * 80)
+            logger.info("TIMESTAMP ALIGNMENT ANALYSIS:")
+            logger.info("-" * 80)
+            
+            ts_diffs = [m['ts_diff_hours'] for m in mismatches]
+            if len(ts_diffs) > 0:
+                logger.info(f"Timestamp differences in mismatches:")
+                logger.info(f"  Min: {min(ts_diffs):.2f} hours")
+                logger.info(f"  Max: {max(ts_diffs):.2f} hours")
+                logger.info(f"  Mean: {np.mean(ts_diffs):.2f} hours")
+                logger.info(f"  Median: {np.median(ts_diffs):.2f} hours")
+                
+                # Count how many have significant timestamp differences (> 0.5 hours)
+                significant_ts_diff = sum(1 for d in ts_diffs if d > 0.5)
+                logger.info(f"  Mismatches with TS diff > 0.5 hours: {significant_ts_diff}/{len(ts_diffs)} ({significant_ts_diff/len(ts_diffs)*100:.1f}%)")
+        
+        # Summary statistics
+        logger.info("\n" + "-" * 80)
+        logger.info("SUMMARY STATISTICS:")
+        logger.info("-" * 80)
+        logger.info(f"PyPSA wind total: {pypsa_wind_hourly['value'].sum():.2f} MWh")
+        logger.info(f"Sienna wind total: {sienna_wind_hourly['value'].sum():.2f} MWh")
+        logger.info(f"Total difference: {abs(pypsa_wind_hourly['value'].sum() - sienna_wind_hourly['value'].sum()):.2f} MWh")
+        logger.info(f"PyPSA wind mean: {pypsa_wind_hourly['value'].mean():.2f} MW")
+        logger.info(f"Sienna wind mean: {sienna_wind_hourly['value'].mean():.2f} MW")
+        logger.info(f"PyPSA wind max: {pypsa_wind_hourly['value'].max():.2f} MW")
+        logger.info(f"Sienna wind max: {sienna_wind_hourly['value'].max():.2f} MW")
+        
+        logger.info("=" * 80)
+        
+    except Exception as e:
+        logger.error(f"Error comparing hourly wind dispatch: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+
+
+def compare_hourly_renewables_dispatch(pypsa_df, sienna_df, timesteps=168):
+    """Compare hourly renewables dispatch (solar, wind, hydro combined) between PyPSA and Sienna.
+    
+    Since all renewables have marginal costs of 0, we combine them for comparison.
+    
+    Parameters:
+        pypsa_df: DataFrame with columns DateTime, carrier, value
+        sienna_df: DataFrame with columns DateTime, carrier, value
+        timesteps: Number of timesteps to compare (default: 168 for 1 week)
+    """
+    logger.info("=" * 80)
+    logger.info("HOURLY RENEWABLES DISPATCH COMPARISON (Solar + Wind + Hydro)")
+    logger.info("=" * 80)
+    
+    try:
+        # Filter renewables from PyPSA (solar, onwind, offwind, hydro)
+        pypsa_renewables = pypsa_df[pypsa_df['carrier'].isin(['solar', 'onwind', 'offwind', 'hydro'])].copy()
+        # Filter renewables from Sienna (PVe = solar, WT = wind, WS = offshore wind, HY = hydro)
+        # Map Sienna carriers to PyPSA names first
+        sienna_df_mapped = sienna_df.copy()
+        sienna_df_mapped['carrier'] = sienna_df_mapped['carrier'].apply(map_sienna_to_pypsa_carrier)
+        sienna_renewables = sienna_df_mapped[sienna_df_mapped['carrier'].isin(['solar', 'onwind', 'offwind', 'hydro'])].copy()
+        
+        if len(pypsa_renewables) == 0:
+            logger.warning("No PyPSA renewables data found")
+            return
+        if len(sienna_renewables) == 0:
+            logger.warning("No Sienna renewables data found")
+            return
+        
+        # Aggregate by DateTime for each system
+        pypsa_renewables_hourly = pypsa_renewables.groupby('DateTime')['value'].sum().reset_index()
+        sienna_renewables_hourly = sienna_renewables.groupby('DateTime')['value'].sum().reset_index()
+        
+        # Sort by DateTime
+        pypsa_renewables_hourly = pypsa_renewables_hourly.sort_values('DateTime').reset_index(drop=True)
+        sienna_renewables_hourly = sienna_renewables_hourly.sort_values('DateTime').reset_index(drop=True)
+        
+        # Limit to specified timesteps
+        pypsa_renewables_hourly = pypsa_renewables_hourly.iloc[:timesteps]
+        sienna_renewables_hourly = sienna_renewables_hourly.iloc[:timesteps]
+        
+        logger.info(f"PyPSA renewables records: {len(pypsa_renewables_hourly)} timesteps")
+        logger.info(f"Sienna renewables records: {len(sienna_renewables_hourly)} timesteps")
+        
+        # Check timestamp alignment
+        pypsa_dates = set(pypsa_renewables_hourly['DateTime'].dt.normalize())
+        sienna_dates = set(sienna_renewables_hourly['DateTime'].dt.normalize())
+        common_dates = pypsa_dates & sienna_dates
+        
+        logger.info(f"PyPSA unique dates: {len(pypsa_dates)}")
+        logger.info(f"Sienna unique dates: {len(sienna_dates)}")
+        logger.info(f"Common dates: {len(common_dates)}")
+        
+        if len(common_dates) == 0:
+            logger.warning("⚠️  NO COMMON DATES FOUND - TIMESTAMP MISMATCH!")
+            logger.info(f"PyPSA date range: {pypsa_renewables_hourly['DateTime'].min()} to {pypsa_renewables_hourly['DateTime'].max()}")
+            logger.info(f"Sienna date range: {sienna_renewables_hourly['DateTime'].min()} to {sienna_renewables_hourly['DateTime'].max()}")
+            return
+        
+        # Try to align by index position (assuming same time period, just different timestamp formats)
+        logger.info("\n" + "-" * 80)
+        logger.info("COMPARING BY INDEX POSITION (assuming same time period)")
+        logger.info("-" * 80)
+        
+        min_len = min(len(pypsa_renewables_hourly), len(sienna_renewables_hourly))
+        mismatches = []
+        matches = []
+        
+        for i in range(min_len):
+            pypsa_val = pypsa_renewables_hourly.iloc[i]['value']
+            sienna_val = sienna_renewables_hourly.iloc[i]['value']
+            pypsa_ts = pypsa_renewables_hourly.iloc[i]['DateTime']
+            sienna_ts = sienna_renewables_hourly.iloc[i]['DateTime']
+            
+            diff = abs(pypsa_val - sienna_val)
+            diff_pct = (diff / max(abs(pypsa_val), 1.0)) * 100 if max(abs(pypsa_val), abs(sienna_val)) > 0.01 else 0.0
+            
+            # Check if timestamps match (within 1 hour)
+            ts_diff = abs((pypsa_ts - sienna_ts).total_seconds() / 3600)
+            
+            if diff > 0.01:  # More than 0.01 MW difference
+                mismatches.append({
+                    'index': i,
+                    'pypsa_ts': pypsa_ts,
+                    'sienna_ts': sienna_ts,
+                    'ts_diff_hours': ts_diff,
+                    'pypsa_val': pypsa_val,
+                    'sienna_val': sienna_val,
+                    'diff_mw': diff,
+                    'diff_pct': diff_pct
+                })
+            else:
+                matches.append(i)
+        
+        logger.info(f"Matches (diff <= 0.01 MW): {len(matches)}/{min_len} ({len(matches)/min_len*100:.1f}%)")
+        logger.info(f"Mismatches (diff > 0.01 MW): {len(mismatches)}/{min_len} ({len(mismatches)/min_len*100:.1f}%)")
+        
+        if len(mismatches) > 0:
+            logger.info("\n" + "-" * 80)
+            logger.info("TOP 20 MISMATCHES (by absolute difference):")
+            logger.info("-" * 80)
+            logger.info(f"{'Index':<8} {'PyPSA TS':<20} {'Sienna TS':<20} {'TS Diff':<10} {'PyPSA (MW)':<12} {'Sienna (MW)':<12} {'Diff (MW)':<12} {'Diff (%)':<10}")
+            logger.info("-" * 80)
+            
+            # Sort by absolute difference
+            mismatches_sorted = sorted(mismatches, key=lambda x: x['diff_mw'], reverse=True)
+            
+            for m in mismatches_sorted[:20]:
+                logger.info(
+                    f"{m['index']:<8} "
+                    f"{str(m['pypsa_ts']):<20} "
+                    f"{str(m['sienna_ts']):<20} "
+                    f"{m['ts_diff_hours']:<10.2f} "
+                    f"{m['pypsa_val']:<12.2f} "
+                    f"{m['sienna_val']:<12.2f} "
+                    f"{m['diff_mw']:<12.2f} "
+                    f"{m['diff_pct']:<10.2f}"
+                )
+            
+            # Check for timestamp misalignment patterns
+            logger.info("\n" + "-" * 80)
+            logger.info("TIMESTAMP ALIGNMENT ANALYSIS:")
+            logger.info("-" * 80)
+            
+            ts_diffs = [m['ts_diff_hours'] for m in mismatches]
+            if len(ts_diffs) > 0:
+                logger.info(f"Timestamp differences in mismatches:")
+                logger.info(f"  Min: {min(ts_diffs):.2f} hours")
+                logger.info(f"  Max: {max(ts_diffs):.2f} hours")
+                logger.info(f"  Mean: {np.mean(ts_diffs):.2f} hours")
+                logger.info(f"  Median: {np.median(ts_diffs):.2f} hours")
+                
+                # Count how many have significant timestamp differences (> 0.5 hours)
+                significant_ts_diff = sum(1 for d in ts_diffs if d > 0.5)
+                logger.info(f"  Mismatches with TS diff > 0.5 hours: {significant_ts_diff}/{len(ts_diffs)} ({significant_ts_diff/len(ts_diffs)*100:.1f}%)")
+        
+        # Summary statistics
+        logger.info("\n" + "-" * 80)
+        logger.info("SUMMARY STATISTICS:")
+        logger.info("-" * 80)
+        logger.info(f"PyPSA renewables total: {pypsa_renewables_hourly['value'].sum():.2f} MWh")
+        logger.info(f"Sienna renewables total: {sienna_renewables_hourly['value'].sum():.2f} MWh")
+        logger.info(f"Total difference: {abs(pypsa_renewables_hourly['value'].sum() - sienna_renewables_hourly['value'].sum()):.2f} MWh")
+        logger.info(f"PyPSA renewables mean: {pypsa_renewables_hourly['value'].mean():.2f} MW")
+        logger.info(f"Sienna renewables mean: {sienna_renewables_hourly['value'].mean():.2f} MW")
+        logger.info(f"PyPSA renewables max: {pypsa_renewables_hourly['value'].max():.2f} MW")
+        logger.info(f"Sienna renewables max: {sienna_renewables_hourly['value'].max():.2f} MW")
+        
+        logger.info("=" * 80)
+        
+    except Exception as e:
+        logger.error(f"Error comparing hourly renewables dispatch: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+
+
+def compare_hourly_nuclear_dispatch(pypsa_df, sienna_df, timesteps=168):
+    """Compare hourly nuclear dispatch between PyPSA and Sienna.
+    
+    Parameters:
+        pypsa_df: DataFrame with columns DateTime, carrier, value
+        sienna_df: DataFrame with columns DateTime, carrier, value
+        timesteps: Number of timesteps to compare (default: 168 for 1 week)
+    """
+    logger.info("=" * 80)
+    logger.info("HOURLY NUCLEAR DISPATCH COMPARISON")
+    logger.info("=" * 80)
+    
+    try:
+        # Filter nuclear data from PyPSA
+        pypsa_nuclear = pypsa_df[pypsa_df['carrier'] == 'nuclear'].copy()
+        # Filter nuclear data from Sienna (map Sienna carrier to PyPSA name)
+        sienna_df_mapped = sienna_df.copy()
+        sienna_df_mapped['carrier'] = sienna_df_mapped['carrier'].apply(map_sienna_to_pypsa_carrier)
+        sienna_nuclear = sienna_df_mapped[sienna_df_mapped['carrier'] == 'nuclear'].copy()
+        
+        if len(pypsa_nuclear) == 0:
+            logger.warning("No PyPSA nuclear data found")
+            return
+        if len(sienna_nuclear) == 0:
+            logger.warning("No Sienna nuclear data found")
+            return
+        
+        # Aggregate by DateTime for each system
+        pypsa_nuclear_hourly = pypsa_nuclear.groupby('DateTime')['value'].sum().reset_index()
+        sienna_nuclear_hourly = sienna_nuclear.groupby('DateTime')['value'].sum().reset_index()
+        
+        # Sort by DateTime
+        pypsa_nuclear_hourly = pypsa_nuclear_hourly.sort_values('DateTime').reset_index(drop=True)
+        sienna_nuclear_hourly = sienna_nuclear_hourly.sort_values('DateTime').reset_index(drop=True)
+        
+        # Limit to specified timesteps
+        pypsa_nuclear_hourly = pypsa_nuclear_hourly.iloc[:timesteps]
+        sienna_nuclear_hourly = sienna_nuclear_hourly.iloc[:timesteps]
+        
+        logger.info(f"PyPSA nuclear records: {len(pypsa_nuclear_hourly)} timesteps")
+        logger.info(f"Sienna nuclear records: {len(sienna_nuclear_hourly)} timesteps")
+        
+        # Check timestamp alignment
+        pypsa_dates = set(pypsa_nuclear_hourly['DateTime'].dt.normalize())
+        sienna_dates = set(sienna_nuclear_hourly['DateTime'].dt.normalize())
+        common_dates = pypsa_dates & sienna_dates
+        
+        logger.info(f"PyPSA unique dates: {len(pypsa_dates)}")
+        logger.info(f"Sienna unique dates: {len(sienna_dates)}")
+        logger.info(f"Common dates: {len(common_dates)}")
+        
+        if len(common_dates) == 0:
+            logger.warning("⚠️  NO COMMON DATES FOUND - TIMESTAMP MISMATCH!")
+            logger.info(f"PyPSA date range: {pypsa_nuclear_hourly['DateTime'].min()} to {pypsa_nuclear_hourly['DateTime'].max()}")
+            logger.info(f"Sienna date range: {sienna_nuclear_hourly['DateTime'].min()} to {sienna_nuclear_hourly['DateTime'].max()}")
+            return
+        
+        # Try to align by index position (assuming same time period, just different timestamp formats)
+        logger.info("\n" + "-" * 80)
+        logger.info("COMPARING BY INDEX POSITION (assuming same time period)")
+        logger.info("-" * 80)
+        
+        min_len = min(len(pypsa_nuclear_hourly), len(sienna_nuclear_hourly))
+        mismatches = []
+        matches = []
+        
+        for i in range(min_len):
+            pypsa_val = pypsa_nuclear_hourly.iloc[i]['value']
+            sienna_val = sienna_nuclear_hourly.iloc[i]['value']
+            pypsa_ts = pypsa_nuclear_hourly.iloc[i]['DateTime']
+            sienna_ts = sienna_nuclear_hourly.iloc[i]['DateTime']
+            
+            diff = abs(pypsa_val - sienna_val)
+            diff_pct = (diff / max(abs(pypsa_val), 1.0)) * 100 if max(abs(pypsa_val), abs(sienna_val)) > 0.01 else 0.0
+            
+            # Check if timestamps match (within 1 hour)
+            ts_diff = abs((pypsa_ts - sienna_ts).total_seconds() / 3600)
+            
+            if diff > 0.01:  # More than 0.01 MW difference
+                mismatches.append({
+                    'index': i,
+                    'pypsa_ts': pypsa_ts,
+                    'sienna_ts': sienna_ts,
+                    'ts_diff_hours': ts_diff,
+                    'pypsa_val': pypsa_val,
+                    'sienna_val': sienna_val,
+                    'diff_mw': diff,
+                    'diff_pct': diff_pct
+                })
+            else:
+                matches.append(i)
+        
+        logger.info(f"Matches (diff <= 0.01 MW): {len(matches)}/{min_len} ({len(matches)/min_len*100:.1f}%)")
+        logger.info(f"Mismatches (diff > 0.01 MW): {len(mismatches)}/{min_len} ({len(mismatches)/min_len*100:.1f}%)")
+        
+        if len(mismatches) > 0:
+            logger.info("\n" + "-" * 80)
+            logger.info("TOP 20 MISMATCHES (by absolute difference):")
+            logger.info("-" * 80)
+            logger.info(f"{'Index':<8} {'PyPSA TS':<20} {'Sienna TS':<20} {'TS Diff':<10} {'PyPSA (MW)':<12} {'Sienna (MW)':<12} {'Diff (MW)':<12} {'Diff (%)':<10}")
+            logger.info("-" * 80)
+            
+            # Sort by absolute difference
+            mismatches_sorted = sorted(mismatches, key=lambda x: x['diff_mw'], reverse=True)
+            
+            for m in mismatches_sorted[:20]:
+                logger.info(
+                    f"{m['index']:<8} "
+                    f"{str(m['pypsa_ts']):<20} "
+                    f"{str(m['sienna_ts']):<20} "
+                    f"{m['ts_diff_hours']:<10.2f} "
+                    f"{m['pypsa_val']:<12.2f} "
+                    f"{m['sienna_val']:<12.2f} "
+                    f"{m['diff_mw']:<12.2f} "
+                    f"{m['diff_pct']:<10.2f}"
+                )
+            
+            # Check for timestamp misalignment patterns
+            logger.info("\n" + "-" * 80)
+            logger.info("TIMESTAMP ALIGNMENT ANALYSIS:")
+            logger.info("-" * 80)
+            
+            ts_diffs = [m['ts_diff_hours'] for m in mismatches]
+            if len(ts_diffs) > 0:
+                logger.info(f"Timestamp differences in mismatches:")
+                logger.info(f"  Min: {min(ts_diffs):.2f} hours")
+                logger.info(f"  Max: {max(ts_diffs):.2f} hours")
+                logger.info(f"  Mean: {np.mean(ts_diffs):.2f} hours")
+                logger.info(f"  Median: {np.median(ts_diffs):.2f} hours")
+                
+                # Count how many have significant timestamp differences (> 0.5 hours)
+                significant_ts_diff = sum(1 for d in ts_diffs if d > 0.5)
+                logger.info(f"  Mismatches with TS diff > 0.5 hours: {significant_ts_diff}/{len(ts_diffs)} ({significant_ts_diff/len(ts_diffs)*100:.1f}%)")
+        
+        # Summary statistics
+        logger.info("\n" + "-" * 80)
+        logger.info("SUMMARY STATISTICS:")
+        logger.info("-" * 80)
+        logger.info(f"PyPSA nuclear total: {pypsa_nuclear_hourly['value'].sum():.2f} MWh")
+        logger.info(f"Sienna nuclear total: {sienna_nuclear_hourly['value'].sum():.2f} MWh")
+        logger.info(f"Total difference: {abs(pypsa_nuclear_hourly['value'].sum() - sienna_nuclear_hourly['value'].sum()):.2f} MWh")
+        logger.info(f"PyPSA nuclear mean: {pypsa_nuclear_hourly['value'].mean():.2f} MW")
+        logger.info(f"Sienna nuclear mean: {sienna_nuclear_hourly['value'].mean():.2f} MW")
+        logger.info(f"PyPSA nuclear max: {pypsa_nuclear_hourly['value'].max():.2f} MW")
+        logger.info(f"Sienna nuclear max: {sienna_nuclear_hourly['value'].max():.2f} MW")
+        
+        logger.info("=" * 80)
+        
+    except Exception as e:
+        logger.error(f"Error comparing hourly nuclear dispatch: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+
+
 def order_carriers_by_marginal_cost(carriers):
     """Order carriers by typical marginal cost (lowest first).
     
     Typical order (bottom to top in dispatch plot):
-    1. Renewables (solar, wind, hydro) - ~0 $/MWh
+    1. Renewables (solar, wind, hydro) - ~0 $/MWh (all grouped together)
     2. Nuclear - ~0-5 $/MWh
     3. Batteries - variable, but typically after renewables
     4. Thermal (gas, coal, oil) - higher costs
@@ -234,25 +697,25 @@ def order_carriers_by_marginal_cost(carriers):
     """
     # Define typical marginal cost order (lower number = lower cost, appears at bottom)
     cost_order = {
-        # Renewables - lowest cost, bottom of stack
+        # Renewables - lowest cost, bottom of stack (all grouped at same level)
         'solar': 1,
-        'onwind': 2,
-        'offwind': 3,
-        'wind': 2,  # Alias for onwind
-        'hydro': 4,
+        'onwind': 1,
+        'offwind': 1,
+        'wind': 1,  # Alias for onwind
+        'hydro': 1,
         # Nuclear - very low cost, after renewables
-        'nuclear': 5,
+        'nuclear': 2,
         # Batteries - after renewables but before thermal
-        'battery': 6,
-        'pumped_hydro': 7,
+        'battery': 3,
+        'pumped_hydro': 3,
         # Thermal - higher costs, top of stack
-        'gas': 8,
-        'coal': 9,
-        'oil': 10,
-        'biomass': 11,
-        'waste': 12,
-        'geothermal': 13,
-        'other': 14,
+        'gas': 4,
+        'coal': 5,
+        'oil': 6,
+        'biomass': 7,
+        'waste': 8,
+        'geothermal': 9,
+        'other': 10,
     }
     
     # Sort carriers by cost order, then alphabetically for ties
@@ -280,34 +743,11 @@ def plot_side_by_side_energy_balance(pypsa_df, sienna_df, carrier_colors, timest
     sienna_df_mapped = sienna_df.copy()
     sienna_df_mapped['carrier'] = sienna_df_mapped['carrier'].apply(map_sienna_to_pypsa_carrier)
     
-    # Debug: Compare wind values for first timestep to investigate discrepancy
-    try:
-        first_ts_pypsa = pd.Timestamp('2030-01-01 00:00:00')
-        first_ts_sienna = pd.Timestamp('2030-01-01T00:00:00.0')
-        
-        # Try both timestamp formats
-        pypsa_wind_first = pypsa_df[(pypsa_df['DateTime'] == first_ts_pypsa) & 
-                                     (pypsa_df['carrier'].isin(['onwind', 'offwind']))]['value'].sum()
-        if pypsa_wind_first == 0:
-            # Try alternative timestamp format
-            pypsa_wind_first = pypsa_df[(pypsa_df['DateTime'].dt.normalize() == first_ts_pypsa.normalize()) & 
-                                         (pypsa_df['carrier'].isin(['onwind', 'offwind']))]['value'].sum()
-        
-        sienna_wind_first = sienna_df[(sienna_df['DateTime'] == first_ts_sienna) & 
-                                       (sienna_df['carrier'] == 'WT')]['value'].sum()
-        if sienna_wind_first == 0:
-            # Try alternative timestamp format
-            sienna_wind_first = sienna_df[(sienna_df['DateTime'].dt.normalize() == first_ts_sienna.normalize()) & 
-                                          (sienna_df['carrier'] == 'WT')]['value'].sum()
-        
-        logger.info(f"First timestep wind comparison - PyPSA: {pypsa_wind_first:.2f} MW, Sienna: {sienna_wind_first:.2f} MW")
-        
-        # Count wind generators
-        pypsa_wind_gens = pypsa_df[pypsa_df['carrier'].isin(['onwind', 'offwind'])]['name'].nunique()
-        sienna_wind_gens = sienna_df[sienna_df['carrier'] == 'WT']['name'].nunique()
-        logger.info(f"Wind generator count - PyPSA: {pypsa_wind_gens}, Sienna: {sienna_wind_gens}")
-    except Exception as e:
-        logger.warning(f"Could not compare wind values: {e}")
+    # Detailed hourly renewables dispatch comparison (solar + wind + hydro combined)
+    compare_hourly_renewables_dispatch(pypsa_df, sienna_df, timesteps=timesteps)
+    
+    # Detailed hourly nuclear dispatch comparison
+    compare_hourly_nuclear_dispatch(pypsa_df, sienna_df, timesteps=timesteps)
     
     # Identify load carriers (common names: 'load', 'AC', 'loads')
     load_carriers = {'load', 'AC', 'loads', 'demand'}
@@ -995,10 +1435,8 @@ def main():
         timesteps=args.timesteps,
         output_file=str(energy_balance_file)
     )
-    if not args.no_show:
-        plt.show()
-    else:
-        plt.close()
+    # Always close the plot (don't show interactively)
+    plt.close()
     
     # # Create marginal costs plot
     # logger.info("Creating marginal costs comparison plot...")
