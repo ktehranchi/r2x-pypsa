@@ -423,17 +423,17 @@ def test_e2e_economic_dispatch():
         logger.info(f"Enabled {store_count} stores (set active=True)")
     logger.info("=" * 80)
     
-    # DISABLE NUCLEAR GENERATORS
+    # ENABLE NUCLEAR GENERATORS (they are active by default, but ensure they're enabled)
     logger.info("=" * 80)
-    logger.info("DISABLING NUCLEAR GENERATORS")
+    logger.info("ENABLING NUCLEAR GENERATORS")
     logger.info("=" * 80)
     if hasattr(network, 'generators') and len(network.generators) > 0:
         nuclear_gens = network.generators[network.generators.carrier == 'nuclear']
         if len(nuclear_gens) > 0:
             nuclear_count = len(nuclear_gens)
             nuclear_capacity = nuclear_gens.p_nom.sum()
-            network.generators.loc[nuclear_gens.index, 'active'] = False
-            logger.info(f"Disabled {nuclear_count} nuclear generators ({nuclear_capacity:.2f} MW total capacity)")
+            network.generators.loc[nuclear_gens.index, 'active'] = True
+            logger.info(f"Enabled {nuclear_count} nuclear generators ({nuclear_capacity:.2f} MW total capacity)")
         else:
             logger.info("No nuclear generators found in network")
     logger.info("=" * 80)
