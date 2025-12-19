@@ -684,7 +684,7 @@ def order_carriers_by_marginal_cost(carriers):
     """Order carriers by typical marginal cost (lowest first).
     
     Typical order (bottom to top in dispatch plot):
-    1. Renewables (solar, wind, hydro) - ~0 $/MWh (all grouped together)
+    1. Renewables - ~0 $/MWh (solar first, then wind, then hydro)
     2. Nuclear - ~0-5 $/MWh
     3. Batteries - variable, but typically after renewables
     4. Thermal (gas, coal, oil) - higher costs
@@ -697,12 +697,13 @@ def order_carriers_by_marginal_cost(carriers):
     """
     # Define typical marginal cost order (lower number = lower cost, appears at bottom)
     cost_order = {
-        # Renewables - lowest cost, bottom of stack (all grouped at same level)
-        'solar': 1,
+        # Renewables - lowest cost, bottom of stack
+        # Solar first, then wind, then hydro
+        'solar': 0.5,
         'onwind': 1,
         'offwind': 1,
         'wind': 1,  # Alias for onwind
-        'hydro': 1,
+        'hydro': 1.5,
         # Nuclear - very low cost, after renewables
         'nuclear': 2,
         # Batteries - after renewables but before thermal
@@ -743,11 +744,10 @@ def plot_side_by_side_energy_balance(pypsa_df, sienna_df, carrier_colors, timest
     sienna_df_mapped = sienna_df.copy()
     sienna_df_mapped['carrier'] = sienna_df_mapped['carrier'].apply(map_sienna_to_pypsa_carrier)
     
-    # Detailed hourly renewables dispatch comparison (solar + wind + hydro combined)
-    compare_hourly_renewables_dispatch(pypsa_df, sienna_df, timesteps=timesteps)
-    
     # Detailed hourly nuclear dispatch comparison
     compare_hourly_nuclear_dispatch(pypsa_df, sienna_df, timesteps=timesteps)
+    
+    # Note: Removed compare_hourly_renewables_dispatch - renewables are now shown separately by carrier
     
     # Identify load carriers (common names: 'load', 'AC', 'loads')
     load_carriers = {'load', 'AC', 'loads', 'demand'}
@@ -784,15 +784,25 @@ def plot_side_by_side_energy_balance(pypsa_df, sienna_df, carrier_colors, timest
     ).fillna(0)
     
     # Aggregate load data (sum all load carriers per timestep)
-    # Take absolute value since load might be stored as negative
+    # Scale load correctly: PyPSA 'load' carrier needs *100, 'AC' is already in MW
+    # Sienna 'load' carrier needs *100
     if len(pypsa_load_df) > 0:
-        pypsa_load_total = pypsa_load_df.groupby('DateTime')['value'].sum().abs()
+        # Scale 'load' carrier by 100, keep 'AC' as-is (already in MW)
+        pypsa_load_scaled = pypsa_load_df.copy()
+        pypsa_load_scaled['value_scaled'] = pypsa_load_scaled.apply(
+            lambda row: row['value'] * 100 if row['carrier'] == 'load' else row['value'],
+            axis=1
+        )
+        pypsa_load_total = pypsa_load_scaled.groupby('DateTime')['value_scaled'].sum().abs()
         logger.debug(f"PyPSA load total: min={pypsa_load_total.min():.2f}, max={pypsa_load_total.max():.2f}, mean={pypsa_load_total.mean():.2f}")
     else:
         pypsa_load_total = pd.Series(dtype=float)
     
     if len(sienna_load_df) > 0:
-        sienna_load_total = sienna_load_df.groupby('DateTime')['value'].sum().abs()
+        # Scale Sienna 'load' carrier by 100
+        sienna_load_scaled = sienna_load_df.copy()
+        sienna_load_scaled['value_scaled'] = sienna_load_scaled['value'] * 100
+        sienna_load_total = sienna_load_scaled.groupby('DateTime')['value_scaled'].sum().abs()
         logger.debug(f"Sienna load total: min={sienna_load_total.min():.2f}, max={sienna_load_total.max():.2f}, mean={sienna_load_total.mean():.2f}")
     else:
         sienna_load_total = pd.Series(dtype=float)
@@ -910,24 +920,26 @@ def plot_side_by_side_energy_balance(pypsa_df, sienna_df, carrier_colors, timest
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 6))
     
     # PyPSA plot (left)
-    # Plot generators as stacked area
+    # Plot generators as stacked area (with low zorder so load can be on top)
     area1 = pypsa_pos.plot.area(
         ax=ax1,
         stacked=True,
         legend=False,
-        color=pypsa_colors
+        color=pypsa_colors,
+        zorder=1  # Low zorder so load line appears on top
     )
     area2 = pypsa_neg.plot.area(
         ax=ax1,
         stacked=True,
         legend=False,
-        color=pypsa_colors
+        color=pypsa_colors,
+        zorder=1  # Low zorder so load line appears on top
     )
     
-    # Plot load as dashed line at the top (absolute demand value)
+    # Plot load as dashed line at the top (absolute demand value, correctly scaled)
     # Plot AFTER area plots to ensure it's on top
     if len(pypsa_load_total) > 0 and pypsa_load_total.abs().sum() > 0:
-        # Plot load line showing total demand (use absolute value to ensure positive)
+        # Load is already scaled correctly (load * 100, AC as-is)
         load_values = pypsa_load_total.abs()
         logger.debug(f"Plotting PyPSA load line: {len(load_values)} points, range [{load_values.min():.2f}, {load_values.max():.2f}]")
         
@@ -936,25 +948,20 @@ def plot_side_by_side_energy_balance(pypsa_df, sienna_df, carrier_colors, timest
             logger.warning(f"Load index doesn't match balance index. Reindexing...")
             load_values = load_values.reindex(pypsa_balance.index, fill_value=0)
         
-        # Use the same x-axis as the area plots by getting the x-axis data from the first area plot
-        # This ensures perfect alignment and avoids converter conflicts
-        x_data = pypsa_balance.index
-        y_data = load_values.values
-        
-        # Plot using explicit x positions (numeric indices) to avoid datetime converter issues
+        # Plot directly on the axis using the same index as the area plots
+        # Use the DataFrame index to ensure proper DateTime handling
         line = ax1.plot(
-            range(len(x_data)),
-            y_data,
-            color='red',
+            pypsa_balance.index,
+            load_values.values,
+            color='black',
             linestyle='--',
-            linewidth=4.0,
+            linewidth=3.0,
             label='Load',
             alpha=1.0,
-            zorder=1000,  # Extremely high zorder to ensure it's on top
-            marker='',  # No markers
-            markersize=0
+            zorder=1000,  # Very high zorder to ensure it's on top of everything
+            drawstyle='default'
         )
-        logger.debug(f"Load line plotted with {len(load_values)} points, visible range: [{load_values.min():.2f}, {load_values.max():.2f}]")
+        logger.info(f"✓ PyPSA load line plotted: {len(load_values)} points, range [{load_values.min():.2f}, {load_values.max():.2f}], y-axis range [{ymin:.2f}, {ymax:.2f}]")
     
     # Set y-axis limits AFTER plotting everything
     ax1.set_ylim(ymin, ymax)
@@ -965,24 +972,26 @@ def plot_side_by_side_energy_balance(pypsa_df, sienna_df, carrier_colors, timest
     ax1.grid(True, alpha=0.3)
     
     # Sienna plot (right)
-    # Plot generators as stacked area
+    # Plot generators as stacked area (with low zorder so load can be on top)
     area1 = sienna_pos.plot.area(
         ax=ax2,
         stacked=True,
         legend=False,
-        color=sienna_colors
+        color=sienna_colors,
+        zorder=1  # Low zorder so load line appears on top
     )
     area2 = sienna_neg.plot.area(
         ax=ax2,
         stacked=True,
         legend=False,
-        color=sienna_colors
+        color=sienna_colors,
+        zorder=1  # Low zorder so load line appears on top
     )
     
-    # Plot load as dashed line at the top (absolute demand value)
+    # Plot load as dashed line at the top (absolute demand value, correctly scaled)
     # Plot AFTER area plots to ensure it's on top
     if len(sienna_load_total) > 0 and sienna_load_total.abs().sum() > 0:
-        # Plot load line showing total demand (use absolute value to ensure positive)
+        # Load is already scaled correctly (load * 100)
         load_values = sienna_load_total.abs()
         logger.debug(f"Plotting Sienna load line: {len(load_values)} points, range [{load_values.min():.2f}, {load_values.max():.2f}]")
         
@@ -991,25 +1000,20 @@ def plot_side_by_side_energy_balance(pypsa_df, sienna_df, carrier_colors, timest
             logger.warning(f"Load index doesn't match balance index. Reindexing...")
             load_values = load_values.reindex(sienna_balance.index, fill_value=0)
         
-        # Use the same x-axis as the area plots by getting the x-axis data from the first area plot
-        # This ensures perfect alignment and avoids converter conflicts
-        x_data = sienna_balance.index
-        y_data = load_values.values
-        
-        # Plot using explicit x positions (numeric indices) to avoid datetime converter issues
+        # Plot directly on the axis using the same index as the area plots
+        # Use the DataFrame index to ensure proper DateTime handling
         line = ax2.plot(
-            range(len(x_data)),
-            y_data,
-            color='red',
+            sienna_balance.index,
+            load_values.values,
+            color='black',
             linestyle='--',
-            linewidth=4.0,
+            linewidth=3.0,
             label='Load',
             alpha=1.0,
-            zorder=1000,  # Extremely high zorder to ensure it's on top
-            marker='',  # No markers
-            markersize=0
+            zorder=1000,  # Very high zorder to ensure it's on top of everything
+            drawstyle='default'
         )
-        logger.debug(f"Load line plotted with {len(load_values)} points, visible range: [{load_values.min():.2f}, {load_values.max():.2f}]")
+        logger.info(f"✓ Sienna load line plotted: {len(load_values)} points, range [{load_values.min():.2f}, {load_values.max():.2f}], y-axis range [{ymin:.2f}, {ymax:.2f}]")
     
     # Set y-axis limits AFTER plotting everything
     ax2.set_ylim(ymin, ymax)

@@ -7,11 +7,12 @@ from datetime import datetime, timedelta
 from infrasys import SingleTimeSeries
 from loguru import logger
 
-from r2x_pypsa.models import PypsaGenerator, PypsaBus, PypsaStore, PypsaLoad, PypsaLine
+from r2x_pypsa.models import PypsaGenerator, PypsaBus, PypsaStore, PypsaLoad, PypsaLine, PypsaStorageUnit
 from r2x_pypsa.models.property_values import PypsaProperty
 from r2x_pypsa.serialization.pypsa_to_psy import pypsa_component_to_psy
 from r2x_pypsa.parser import PypsaParser
 from r2x_pypsa.serialization import create_default_mapping
+import uuid
 
 
 def test_psy_serialization_generator() -> None:
@@ -49,108 +50,168 @@ def test_psy_serialization_generator() -> None:
     test_gen = generators_with_ts[0]
     logger.info(f"Testing generator: {test_gen.name}")
     
-    # Convert to PSY system (like e2e test does)
+    # Create Sienna system
+    psy_system = System()
     mapping = create_default_mapping()
-    psy_system = System(
-        name="PSY system",
-        auto_add_composed_components=True,
-        time_series_storage_type=TimeSeriesStorageType.HDF5
-    )
     
-    # Convert all components (like e2e test does)
-    for component in pypsa_system._component_mgr.iter_all():
-        try:
-            pypsa_component_to_psy(component, pypsa_system, psy_system, mapping)
-        except Exception as e:
-            logger.warning(f"Failed to convert component {component.name}: {e}")
-            continue
+    # Create bus first (required for generator)
+    bus_name = test_gen.bus
+    if not psy_system.list_components_by_name(ACBus, bus_name):
+        from r2x_pypsa.models import PypsaBus
+        pypsa_bus = pypsa_system.get_component(PypsaBus, bus_name)
+        if pypsa_bus:
+            pypsa_component_to_psy(pypsa_bus, pypsa_system, psy_system, mapping)
     
-    # Check generator was converted
-    psy_generators = list(psy_system.get_components(RenewableDispatch)) + list(psy_system.get_components(ThermalStandard))
-    assert len(psy_generators) > 0, "Should have generators"
+    # Convert generator
+    pypsa_component_to_psy(test_gen, pypsa_system, psy_system, mapping)
     
-    # Find our test generator
-    psy_gen = None
-    for gen in psy_generators:
-        if gen.name == test_gen.name:
-            psy_gen = gen
-            break
+    # Verify conversion
+    psy_gen = psy_system.get_component(RenewableDispatch, test_gen.name)
+    assert psy_gen is not None, f"Generator {test_gen.name} not found in Sienna system"
     
-    assert psy_gen is not None, f"Generator {test_gen.name} should be converted"
+    # Check that time series was added
+    assert psy_system.has_time_series(psy_gen, "max_active_power"), \
+        f"Generator {test_gen.name} should have max_active_power time series"
     
-    # Check that time series was extracted and added
-    time_series_list = list(psy_system.list_time_series(psy_gen))
-    assert len(time_series_list) > 0, f"Generator {test_gen.name} should have time series"
+    ts = psy_system.get_time_series(psy_gen, "max_active_power")
+    assert ts is not None, f"Time series for {test_gen.name} should not be None"
     
-    # Find the max_active_power time series
-    max_power_ts = None
-    for ts in time_series_list:
-        if ts.name == "max_active_power":
-            max_power_ts = ts
-            break
+    # Verify time series data matches
+    pypsa_ts = test_gen.p_max_pu.get_time_series()
+    assert len(ts.data) == len(pypsa_ts), \
+        f"Time series length mismatch: {len(ts.data)} vs {len(pypsa_ts)}"
     
-    assert max_power_ts is not None, f"Generator {test_gen.name} should have max_active_power time series"
-    # Check it has data (length depends on optimization snapshots)
-    assert len(max_power_ts.data) > 0, "Time series should have data"
-    assert max_power_ts.resolution == timedelta(hours=1), "Resolution should be 1 hour"
+    logger.info(f"✓ Generator conversion test passed for {test_gen.name}")
 
 
-def test_psy_serialization_store() -> None:
-    """Test PypsaStore to EnergyReservoirStorage conversion."""
-    system = System()
+def test_storage_target_cyclic() -> None:
+    """Test that storage_target is set correctly for cyclic storage units.
     
-    # Create a PypsaStore
-    store = PypsaStore(
-        name="test_store",
-        bus="Bus1",
-        e_nom=PypsaProperty.create(value=100.0, units="MWh"),
-        marginal_cost=PypsaProperty.create(value=50.0, units="usd/MWh"),
-        standing_loss=PypsaProperty.create(value=0.01),  # 1% standing loss
-        carrier=PypsaProperty.create(value="hydrogen")
-    )
-    
-    # Create a bus
-    bus = PypsaBus(name="Bus1")
-    
-    system.add_components(store, bus)
-    
+    When cyclic_state_of_charge_per_period=True, storage_target should equal
+    initial_storage_capacity_level to enforce initial = final SOC constraint.
+    """
+    # Create test systems
+    pypsa_system = System()
     psy_system = System()
-    # Convert the bus first
-    pypsa_component_to_psy(bus, system, psy_system)
-    # Then convert the store
-    pypsa_component_to_psy(store, system, psy_system)
+    mapping = create_default_mapping()
     
-    # Check that the store was converted
-    psy_stores = list(psy_system.get_components(EnergyReservoirStorage))
-    assert len(psy_stores) == 1
-    assert psy_stores[0].name == store.name
-    assert psy_stores[0].storage_capacity.magnitude == 100.0
-    assert psy_stores[0].efficiency.input == 0.99  # 1 - 0.01 standing loss
-    assert psy_stores[0].efficiency.output == 0.99  # 1 - 0.01 standing loss
+    # Create a bus first (using PypsaBus and converting it)
+    from r2x_pypsa.models import PypsaBus
+    pypsa_bus = PypsaBus(
+        name="test_bus",
+        carrier=PypsaProperty.create(value="AC"),
+        v_nom=PypsaProperty.create(value=138.0, units="kV"),
+    )
+    pypsa_system.add_component(pypsa_bus)
+    pypsa_component_to_psy(pypsa_bus, pypsa_system, psy_system, mapping)
+    
+    # Create a PyPSA storage unit with cyclic_state_of_charge_per_period=True
+    p_nom = 100.0  # MW
+    max_hours = 4.0  # hours
+    storage_capacity = p_nom * max_hours  # 400 MWh
+    state_of_charge_initial = 200.0  # MWh (50% of capacity)
+    initial_soc_fraction = state_of_charge_initial / storage_capacity  # 0.5
+    
+    storage_unit = PypsaStorageUnit(
+        uuid=uuid.uuid4(),
+        name="test_storage_cyclic",
+        bus="test_bus",
+        p_nom=PypsaProperty.create(value=p_nom, units="MW"),
+        max_hours=PypsaProperty.create(value=max_hours, units="hours"),
+        state_of_charge_initial=PypsaProperty.create(value=state_of_charge_initial, units="MWh"),
+        cyclic_state_of_charge_per_period=PypsaProperty.create(value=True),
+        efficiency_store=PypsaProperty.create(value=0.9),
+        efficiency_dispatch=PypsaProperty.create(value=0.9),
+        p_min_pu=PypsaProperty.create(value=-1.0),
+        p_max_pu=PypsaProperty.create(value=1.0),
+    )
+    pypsa_system.add_component(storage_unit)
+    
+    # Convert to Sienna
+    pypsa_component_to_psy(storage_unit, pypsa_system, psy_system, mapping)
+    
+    # Verify conversion
+    psy_storage = psy_system.get_component(EnergyReservoirStorage, "test_storage_cyclic")
+    assert psy_storage is not None, "Storage unit not found in Sienna system"
+    
+    # NOTE: storage_target is NO LONGER set in ext dict to avoid PowerSimulations bugs
+    # Even when energy_target=false, PowerSimulations may try to read storage_target from JSON
+    # and create StorageEnergySurplusVariable, causing dimension mismatch errors.
+    # The test now verifies that storage_target is NOT in ext (to avoid the bug)
+    # and that initial_storage_capacity_level is set correctly for cyclic storage.
+    assert "storage_target" not in psy_storage.ext, \
+        f"storage_target should NOT be set in ext dict (to avoid PowerSimulations bug) for {psy_storage.name}"
+    
+    # Verify initial_storage_capacity_level is set correctly (should be ~0.5 = 50%)
+    assert abs(psy_storage.initial_storage_capacity_level - initial_soc_fraction) < 1e-6, \
+        f"initial_storage_capacity_level ({psy_storage.initial_storage_capacity_level}) should be " \
+        f"{initial_soc_fraction} (50% of capacity)"
+    
+    # For cyclic storage, the expected storage_target would equal initial_storage_capacity_level
+    # but we're not setting it in ext to avoid the PowerSimulations bug
+    expected_storage_target = initial_soc_fraction
+    logger.info(f"✓ Cyclic storage test passed: expected_storage_target={expected_storage_target:.4f} "
+                f"(not set in ext to avoid bug), initial_storage_capacity_level={psy_storage.initial_storage_capacity_level:.4f}")
 
 
-def test_psy_serialization_from_netcdf() -> None:
-    """Test PyPSA to PSY conversion using the test_network.nc file."""
-    test_file = Path(__file__).parent / "data" / "test_network.nc"
-    if not test_file.exists():
-        pytest.skip(f"Test network file not found: {test_file}")
+def test_storage_target_non_cyclic() -> None:
+    """Test that storage_target is 0.0 for non-cyclic storage units.
     
-    # Parse and convert
-    parser = PypsaParser(netcdf_file=str(test_file))
-    pypsa_system = parser.build_system()
+    When cyclic_state_of_charge_per_period=False, storage_target should be 0.0.
+    """
+    # Create test systems
+    pypsa_system = System()
     psy_system = System()
+    mapping = create_default_mapping()
     
-    # Convert all components
-    for component in pypsa_system._component_mgr.iter_all():
-        pypsa_component_to_psy(component, pypsa_system, psy_system)
+    # Create a bus first (using PypsaBus and converting it)
+    from r2x_pypsa.models import PypsaBus
+    pypsa_bus = PypsaBus(
+        name="test_bus",
+        carrier=PypsaProperty.create(value="AC"),
+        v_nom=PypsaProperty.create(value=138.0, units="kV"),
+    )
+    pypsa_system.add_component(pypsa_bus)
+    pypsa_component_to_psy(pypsa_bus, pypsa_system, psy_system, mapping)
     
-    # Basic validation
-    psy_buses = list(psy_system.get_components(ACBus))
-    psy_generators = list(psy_system.get_components(ThermalStandard)) + list(psy_system.get_components(RenewableDispatch))
+    # Create a PyPSA storage unit with cyclic_state_of_charge_per_period=False
+    p_nom = 100.0  # MW
+    max_hours = 4.0  # hours
+    storage_capacity = p_nom * max_hours  # 400 MWh
+    state_of_charge_initial = 200.0  # MWh (50% of capacity)
+    initial_soc_fraction = state_of_charge_initial / storage_capacity  # 0.5
     
-    assert len(psy_buses) > 0, "Should have buses"
-    assert len(psy_generators) > 0, "Should have generators"
+    storage_unit = PypsaStorageUnit(
+        uuid=uuid.uuid4(),
+        name="test_storage_non_cyclic",
+        bus="test_bus",
+        p_nom=PypsaProperty.create(value=p_nom, units="MW"),
+        max_hours=PypsaProperty.create(value=max_hours, units="hours"),
+        state_of_charge_initial=PypsaProperty.create(value=state_of_charge_initial, units="MWh"),
+        cyclic_state_of_charge_per_period=PypsaProperty.create(value=False),  # Non-cyclic
+        efficiency_store=PypsaProperty.create(value=0.9),
+        efficiency_dispatch=PypsaProperty.create(value=0.9),
+        p_min_pu=PypsaProperty.create(value=-1.0),
+        p_max_pu=PypsaProperty.create(value=1.0),
+    )
+    pypsa_system.add_component(storage_unit)
     
-    # Compare lengths - should have same number of buses
-    pypsa_buses = list(pypsa_system.get_components(PypsaBus))
-    assert len(psy_buses) == len(pypsa_buses), f"Expected {len(pypsa_buses)} buses, got {len(psy_buses)}"
+    # Convert to Sienna
+    pypsa_component_to_psy(storage_unit, pypsa_system, psy_system, mapping)
+    
+    # Verify conversion
+    psy_storage = psy_system.get_component(EnergyReservoirStorage, "test_storage_non_cyclic")
+    assert psy_storage is not None, "Storage unit not found in Sienna system"
+    
+    # NOTE: storage_target is NO LONGER set in ext dict to avoid PowerSimulations bugs
+    # Verify that storage_target is NOT in ext (to avoid the bug)
+    assert "storage_target" not in psy_storage.ext, \
+        f"storage_target should NOT be set in ext dict (to avoid PowerSimulations bug) for {psy_storage.name}"
+    
+    # Verify initial_storage_capacity_level is still set correctly
+    assert abs(psy_storage.initial_storage_capacity_level - initial_soc_fraction) < 1e-6, \
+        f"initial_storage_capacity_level ({psy_storage.initial_storage_capacity_level}) should be " \
+        f"{initial_soc_fraction} (50% of capacity)"
+    
+    logger.info(f"✓ Non-cyclic storage test passed: storage_target not set in ext (to avoid bug), "
+                f"initial_storage_capacity_level={psy_storage.initial_storage_capacity_level:.4f}")

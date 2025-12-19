@@ -254,8 +254,8 @@ OUTPUT_FIELDS = {
         "output_active_power_limits",
         "discharge_efficiency",
         "storage_technology_type",
-        "storage_target",
         "operation_cost",
+        "storage_target",
         "services",
         "dynamic_injector",
         "ext",
@@ -275,9 +275,25 @@ def serialize_component_to_psy(
         value = psy_serialization(component, field, *args, **kwargs)
         if value is not None:
             refs[field] = value
+    
     data = component.model_dump(
         *args, mode="json", by_alias=True, round_trip=True, **kwargs
     )
+    
+    # Handle storage_target for EnergyReservoirStorage (stored in ext dict, not a model field)
+    # Only include it if it exists in ext and is non-zero (indicating we want to use energy_target=true)
+    # NOTE: We're NOT setting storage_target in ext anymore to avoid PowerSimulations bugs,
+    # so this code path should rarely execute. If it does, only include it if non-zero.
+    if component.__class__.__name__ == "EnergyReservoirStorage":
+        storage_target_value = component.ext.get("storage_target")
+        if storage_target_value is not None and storage_target_value != 0.0:
+            data["storage_target"] = storage_target_value
+            # Remove from ext dict to avoid duplication (it will be in ext from model_dump)
+            if "ext" in data and isinstance(data["ext"], dict):
+                data["ext"].pop("storage_target", None)
+        # If storage_target is 0.0 or None, don't include it in the JSON at all
+        # This prevents PowerSimulations from trying to read it when energy_target=false
+    
     data = _ingest_psy_metadata(component, data)
     data.update(refs)
 
@@ -427,13 +443,14 @@ def infrasys_to_psy(
     
     # Default filename that infrasys might have created
     default_storage_file = filename.parent / "time_series_storage.h5"
+    time_series_metadata_file = filename.parent / "time_series_storage_metadata.db"
 
     # Close and remove HDF5 file if it exists (must be done before serialization)
     # This prevents "destination object already exists" errors
     if hasattr(system._time_series_mgr.storage, '_file') and system._time_series_mgr.storage._file is not None:
         try:
             system._time_series_mgr.storage._file.close()
-        except:
+        except Exception:
             pass
     
     # Remove both the default file and the new matching filename if they exist
@@ -444,6 +461,9 @@ def infrasys_to_psy(
     if time_series_storage_file.exists():
         time_series_storage_file.unlink()
         logger.debug(f"Removed existing storage file: {time_series_storage_file}")
+    
+    if time_series_metadata_file.exists():
+        time_series_metadata_file.unlink()
     
     # Update the storage file path in the system to match our desired filename
     # This ensures serialize() writes to the correct file
@@ -464,7 +484,7 @@ def infrasys_to_psy(
     
     # Log what the storage is actually using
     logger.info(f"Time series storage file will be: {time_series_storage_file}")
-    logger.info(f"Storage object attributes: {[attr for attr in dir(storage) if 'file' in attr.lower() or 'path' in attr.lower()]}")
+    logger.debug(f"Storage object attributes: {[attr for attr in dir(storage) if 'file' in attr.lower() or 'path' in attr.lower()]}")
 
     output_json: Dict[str, Any] = {
         "units_settings": {
@@ -520,9 +540,6 @@ def infrasys_to_psy(
     #   PowerSystems v5 bug where get_max_active_power() returns MW instead of per-unit.
     #   PowerSimulations StaticPowerLoad will use the time series values directly in MW.
     # For generators: use get_max_active_power (like r2x-plexos, works in v5)
-    scaling_factor_base = orjson.dumps(
-        {"__metadata__": {"function": "get_base_power", "module": "PowerSystems"}}
-    ).decode()
     scaling_factor_max = orjson.dumps(
         {"__metadata__": {"function": "get_max_active_power", "module": "PowerSystems"}}
     ).decode()
@@ -552,7 +569,7 @@ def infrasys_to_psy(
             {}, filename.parent, "time_series_storage_metadata.db"
         )
     except RuntimeError as e:
-        if "already exists" in str(e):
+        if "already exists" in str(e) or "Unable to synchronously copy object" in str(e):
             # If objects already exist, remove both files and try again
             logger.warning(f"HDF5 file had existing objects, removing and retrying: {e}")
             if default_storage_file.exists():
@@ -575,13 +592,21 @@ def infrasys_to_psy(
         logger.info(f"Removing duplicate default file: {default_storage_file}")
         default_storage_file.unlink()
     
-    # Verify the correct file exists
+    # Verify the correct file exists and update version if needed
     if not time_series_storage_file.exists():
         logger.warning(f"Expected HDF5 file {time_series_storage_file} was not created!")
         # Check what files were actually created
         h5_files = list(filename.parent.glob("*.h5"))
         logger.warning(f"Found HDF5 files in {filename.parent}: {h5_files}")
     else:
+        # Ensure the file has the correct data format version
+        import h5py
+        try:
+            with h5py.File(time_series_storage_file, "r+") as f:
+                if "time_series" in f:
+                    f["time_series"].attrs["data_format_version"] = "2.0.0"
+        except Exception:
+            pass  # If we can't update it, that's okay
         logger.info(f"✓ HDF5 file created successfully: {time_series_storage_file}")
 
     return

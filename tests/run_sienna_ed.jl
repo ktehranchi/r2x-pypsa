@@ -14,7 +14,10 @@ Pkg.activate(@__DIR__)
 using PowerSystems
 using PowerSystems: get_time_series_array, DeterministicSingleTimeSeries, PrimeMovers
 using PowerSimulations
-using PowerSimulations: ActivePowerTimeSeriesParameter, ActivePowerVariable, ActivePowerOutVariable, ActivePowerInVariable
+using PowerSimulations: ActivePowerTimeSeriesParameter, ActivePowerVariable, ActivePowerOutVariable, ActivePowerInVariable, RampConstraint, get_optimization_container, get_constraint, RateofChangeConstraintSlackDown, RateofChangeConstraintSlackUp, get_variable
+using JuMP
+using MathOptInterface
+const MOI = MathOptInterface
 using Gurobi
 using Dates
 using Serialization
@@ -377,7 +380,9 @@ else
     # Create problem template
     println("Creating problem template...")
     template = ProblemTemplate()
-    set_device_model!(template, ThermalStandard, ThermalStandardDispatch)
+    # Explicitly disable ramp slack variables to enforce strict ramp constraints
+    thermal_model = DeviceModel(ThermalStandard, ThermalStandardDispatch; use_slacks = false)
+    set_device_model!(template, thermal_model)
     set_device_model!(template, RenewableDispatch, RenewableFullDispatch)
     
     # Configure StaticPowerLoad - use default "max_active_power" time series name
@@ -397,7 +402,7 @@ else
                     attributes = Dict{String, Any}(
                         "reservation" => false,
                         "cycling_limits" => false,
-                        "energy_target" => false,
+                        "energy_target" => false,  # Enable energy target to enforce initial = final SOC (cyclic constraint)
                         "complete_coverage" => false,
                         "regularization" => false,
                     ),
@@ -463,6 +468,52 @@ renewable_gens = collect(get_components(RenewableDispatch, sys))
 if !isempty(thermal_gens)
     total_thermal = sum(get_max_active_power(g) for g in thermal_gens)
     println("  Total thermal capacity: $(total_thermal) MW")
+end
+
+# Debug: Print ramp limits for nuclear generators
+println("\nNuclear generator ramp limits:")
+nuclear_gens = [g for g in thermal_gens if get_fuel(g) == ThermalFuels.NUCLEAR]
+if !isempty(nuclear_gens)
+    for gen in nuclear_gens
+        ramp_limits = get_ramp_limits(gen)
+        if ramp_limits !== nothing
+            # Note: get_ramp_limits() returns values in the current unit system
+            # PowerSimulations uses SYSTEM_BASE, so constraints use per-unit values
+            # But we check here to see the values in the current unit system
+            current_units = get_units_base(sys)
+            rating_mw = get_rating(gen)  # Returns value in current unit system
+            base_power = get_base_power(gen)
+            max_power = get_max_active_power(gen)
+            rating_pu = rating_mw / base_power  # Convert to per-unit
+            println("  Generator: $(get_name(gen))")
+            println("    Current unit system: $current_units")
+            println("    Rating: $(rating_mw) MW ($(rating_pu) pu), Base power: $(base_power) MVA, Max power: $(max_power) MW")
+            # get_ramp_limits() returns values in current unit system
+            # In NATURAL_UNITS: MW/min, in SYSTEM_BASE: pu/min
+            println("    Ramp limits (in $current_units): up=$(ramp_limits.up), down=$(ramp_limits.down)")
+            if current_units == "NATURAL_UNITS"
+                println("    Ramp limits (MW/min): up=$(ramp_limits.up) MW/min, down=$(ramp_limits.down) MW/min")
+                ramp_limits_pu = (up = ramp_limits.up / base_power, down = ramp_limits.down / base_power)
+                println("    Ramp limits (pu/min): up=$(ramp_limits_pu.up) pu/min, down=$(ramp_limits_pu.down) pu/min")
+                println("    Max ramp down per hour (60 min): $(ramp_limits.down * 60) MW/h")
+            else
+                # Already in per-unit
+                println("    Ramp limits (pu/min): up=$(ramp_limits.up) pu/min, down=$(ramp_limits.down) pu/min")
+                ramp_limits_mw = (up = ramp_limits.up * base_power, down = ramp_limits.down * base_power)
+                println("    Ramp limits (MW/min): up=$(ramp_limits_mw.up) MW/min, down=$(ramp_limits_mw.down) MW/min")
+                println("    Max ramp down per hour (60 min): $(ramp_limits.down * 60) pu/h = $(ramp_limits.down * 60 * base_power) MW/h")
+            end
+            # Verify conversion from PyPSA: if PyPSA has 0.325 pu/h, expected ramp_down_pu_per_min = (0.325 * rating_pu) / 60.0
+            expected_ramp_down_pu_per_min = (0.325 * rating_pu) / 60.0
+            expected_ramp_down_mw_per_min = expected_ramp_down_pu_per_min * base_power
+            println("    Expected from PyPSA (0.325 pu/h): $(expected_ramp_down_pu_per_min) pu/min = $(expected_ramp_down_mw_per_min) MW/min")
+            println("    Actual vs Expected ratio: $(ramp_limits.down / expected_ramp_down_mw_per_min)")
+        else
+            println("  Generator: $(get_name(gen)) - No ramp limits set")
+        end
+    end
+else
+    println("  No nuclear generators found")
 end
 if !isempty(renewable_gens)
     total_renewable = sum(get_max_active_power(g) for g in renewable_gens)
@@ -1258,6 +1309,164 @@ build!(model; output_dir=output_dir)
 
 # Check what's actually in the built model
 println("\nModel built. Checking dispatched components:")
+
+# DEBUG: Check ramp constraints for nuclear generators
+println("\n" * "="^80)
+println("DEBUGGING RAMP CONSTRAINTS FOR NUCLEAR GENERATORS")
+println("="^80)
+try
+    container = get_optimization_container(model)
+    # Get resolution from system's time series (or default to 1 hour)
+    resolutions = get_time_series_resolutions(sys)
+    if !isempty(resolutions)
+        resolution = first(resolutions)  # Use first resolution found
+        minutes_per_period = Dates.value(Dates.Minute(resolution))
+    else
+        # Default to 1 hour if no time series found
+        minutes_per_period = 60
+        resolution = Dates.Hour(1)
+    end
+    println("  Time resolution: $resolution")
+    println("  Minutes per period: $minutes_per_period")
+    
+    # Get nuclear generators
+    local nuclear_gens = [g for g in collect(get_components(ThermalStandard, sys)) if get_fuel(g) == ThermalFuels.NUCLEAR]
+    
+    for gen in nuclear_gens
+        name = get_name(gen)
+        # Note: PowerSimulations uses SYSTEM_BASE, so get_ramp_limits() returns per-unit values
+        # We need to check the unit system to interpret correctly
+        current_units = get_units_base(sys)
+        ramp_limits = get_ramp_limits(gen)
+        initial_power = get_active_power(gen)
+        base_power = get_base_power(gen)
+        
+        println("\n  Generator: $name")
+        println("    Current unit system: $current_units")
+        println("    Initial power: $initial_power (value depends on unit system)")
+        if current_units == "SYSTEM_BASE"
+            # Ramp limits are in per-unit per minute
+            ramp_down_pu_per_min = ramp_limits.down
+            ramp_down_mw_per_min = ramp_down_pu_per_min * base_power
+            ramp_down_pu_per_h = ramp_down_pu_per_min * 60
+            ramp_down_mw_per_h = ramp_down_mw_per_min * 60
+            println("    Ramp limits (pu/min): down=$(ramp_down_pu_per_min) pu/min")
+            println("    Ramp limits (MW/min): down=$(ramp_down_mw_per_min) MW/min")
+            println("    Max ramp down per period: $(ramp_down_pu_per_min * minutes_per_period) pu = $(ramp_down_mw_per_min * minutes_per_period) MW")
+        else
+            # Ramp limits are in MW/min (NATURAL_UNITS)
+            println("    Ramp limits (MW/min): down=$(ramp_limits.down) MW/min")
+            println("    Max ramp down per period: $(ramp_limits.down * minutes_per_period) MW")
+        end
+        
+        # Try to access ramp constraints
+        try
+            # Get all constraint keys from container
+            constraint_keys = collect(keys(container.constraints))
+            ramp_keys = [k for k in constraint_keys if occursin("RampConstraint", string(k))]
+            
+            if length(ramp_keys) > 0
+                # Find the ramp down constraint key
+                ramp_dn_key = nothing
+                for key in ramp_keys
+                    if occursin("\"dn\"", string(key)) || occursin("dn", string(key))
+                        ramp_dn_key = key
+                        break
+                    end
+                end
+                
+                if ramp_dn_key !== nothing
+                    # Get the constraint container for ramp down
+                    ramp_constraints_dn = container.constraints[ramp_dn_key]
+                    
+                    # DenseAxisArray uses array indexing, not haskey with tuples
+                    try
+                        # Try to access constraint for this generator at timestep 1
+                        con = ramp_constraints_dn[name, 1]
+                        con_obj = JuMP.constraint_object(con)
+                        println("    ✓ Ramp DOWN constraint found for timestep 1")
+                        println("    Constraint type: $(typeof(con_obj.func))")
+                        println("    Constraint set: $(typeof(con_obj.set))")
+                        
+                        # Check if constraint uses expressions or variables
+                        constraint_str = string(con_obj)
+                        if occursin("ActivePowerRangeExpression", constraint_str)
+                            println("    ⚠️  WARNING: Constraint uses EXPRESSIONS (ActivePowerRangeExpressionLB/UB)")
+                            println("    This may not properly enforce ramp-down limits!")
+                        elseif occursin("ActivePowerVariable", constraint_str)
+                            println("    ✓ Constraint uses VARIABLES (ActivePowerVariable) - correct!")
+                            # Show the actual constraint for timestep 2 (ramp between 1 and 2)
+                            if name in first(axes(ramp_constraints_dn))
+                                try
+                                    con2 = ramp_constraints_dn[name, 2]
+                                    con2_obj = JuMP.constraint_object(con2)
+                                    constraint_str2 = string(con2_obj)
+                                    println("    Constraint for timestep 2: $constraint_str2")
+                                    
+                                    # Extract the constraint RHS value
+                                    # PowerSimulations uses SYSTEM_BASE, so constraint values are in per-unit
+                                    # The constraint is: variable[t-1] - variable[t] >= -ramp_limit_pu_per_hour
+                                    # For GreaterThan set, the lower bound is the RHS value
+                                    if typeof(con2_obj.set) <: MOI.GreaterThan
+                                        rhs_value = con2_obj.set.lower  # Get the lower bound (negative ramp limit)
+                                        rhs_pu_per_h = abs(rhs_value)  # Per-unit per hour
+                                        # Convert to MW/h for comparison (multiply by base_power)
+                                        base_power_gen = get_base_power(gen)
+                                        rhs_mw_per_h = rhs_pu_per_h * base_power_gen
+                                        println("    Constraint RHS: $(rhs_pu_per_h) pu/h = $(rhs_mw_per_h) MW/h")
+                                        
+                                        # Get expected value - need to account for unit system
+                                        # PowerSimulations uses SYSTEM_BASE, so ramp_limits.down is in pu/min
+                                        expected_pu_per_h = ramp_limits.down * 60  # pu/min * 60 = pu/h
+                                        expected_mw_per_h = expected_pu_per_h * base_power_gen
+                                        println("    Expected from ramp_limits: $(expected_pu_per_h) pu/h = $(expected_mw_per_h) MW/h")
+                                        diff = abs(rhs_mw_per_h - expected_mw_per_h)
+                                        if diff < 0.1
+                                            println("    ✓ Constraint value matches expected ramp limit!")
+                                        else
+                                            println("    ⚠️  Constraint value ($(rhs_mw_per_h) MW/h) differs from expected ($(expected_mw_per_h) MW/h) by $(diff) MW/h")
+                                        end
+                                    else
+                                        println("    Constraint set type: $(typeof(con2_obj.set))")
+                                    end
+                                catch e
+                                    println("    Could not access constraint for timestep 2: $e")
+                                end
+                            end
+                        else
+                            # Print first part of constraint to see structure
+                            constraint_preview = length(constraint_str) > 300 ? constraint_str[1:300] * "..." : constraint_str
+                            println("    ? Constraint structure (preview): $constraint_preview")
+                        end
+                    catch e
+                        println("    ⚠️  WARNING: Could not access ramp DOWN constraint for timestep 1: $e")
+                        # Show available generators in the constraint
+                        try
+                            available_gens = collect(first(axes(ramp_constraints_dn)))
+                            println("    Available generators in ramp constraints: $(available_gens[1:min(5, length(available_gens))])")
+                        catch
+                        end
+                    end
+                else
+                    println("    ⚠️  WARNING: Could not find ramp down constraint key")
+                end
+            else
+                println("    ⚠️  WARNING: No ramp constraints found in the model!")
+            end
+        catch e
+            println("    Could not access ramp constraints: $e")
+            println("    Error type: $(typeof(e))")
+        end
+    end
+catch e
+    println("ERROR checking ramp constraints: $e")
+    println("  Stacktrace:")
+    for (exc, bt) in Base.catch_stack()
+        showerror(stdout, exc, bt)
+        println()
+    end
+end
+println("="^80)
 try
     # Try to get component information from the built model
     # This is PowerSimulations-specific and may vary by version
@@ -1337,6 +1546,118 @@ try
     global objective = get_objective_value(results)
     println("✓ Model solved successfully!")
     println("  Objective: $(objective)")
+    
+    # Check for ramp slack variables
+    println("\n" * "="^80)
+    println("CHECKING FOR RAMP SLACK VARIABLES")
+    println("="^80)
+    
+    try
+        container = get_optimization_container(model)
+        
+        # Get nuclear generators
+        local nuclear_gens = [g for g in collect(get_components(ThermalStandard, sys)) if get_fuel(g) == ThermalFuels.NUCLEAR]
+        
+        # Check if RateofChangeConstraintSlackDown variables exist
+        try
+            slack_dn = get_variable(container, RateofChangeConstraintSlackDown(), ThermalStandard)
+            println("  ⚠️  WARNING: RateofChangeConstraintSlackDown variables EXIST in container!")
+            println("  This means slack variables were created even though use_slacks = false")
+            
+            # Check values for nuclear generators
+            for gen in nuclear_gens
+                name = get_name(gen)
+                if name in first(axes(slack_dn))
+                    for t in [1, 2, 3]
+                        try
+                            slack_val = JuMP.value(slack_dn[name, t])
+                            if slack_val > 1e-6  # Non-zero slack
+                                println("    Generator $name, timestep $t: slack_dn = $slack_val (NON-ZERO!)")
+                            end
+                        catch
+                        end
+                    end
+                end
+            end
+        catch e
+            println("  ✓ RateofChangeConstraintSlackDown variables do NOT exist (expected when use_slacks = false)")
+        end
+        
+        # Check if RateofChangeConstraintSlackUp variables exist
+        try
+            slack_up = get_variable(container, RateofChangeConstraintSlackUp(), ThermalStandard)
+            println("  ⚠️  WARNING: RateofChangeConstraintSlackUp variables EXIST in container!")
+            
+            for gen in nuclear_gens
+                name = get_name(gen)
+                if name in first(axes(slack_up))
+                    for t in [1, 2, 3]
+                        try
+                            slack_val = JuMP.value(slack_up[name, t])
+                            if slack_val > 1e-6
+                                println("    Generator $name, timestep $t: slack_up = $slack_val (NON-ZERO!)")
+                            end
+                        catch
+                        end
+                    end
+                end
+            end
+        catch e
+            println("  ✓ RateofChangeConstraintSlackUp variables do NOT exist (expected when use_slacks = false)")
+        end
+        
+        # Also check the actual constraint to see if slack terms are present
+        println("\n  Checking constraint structure for slack terms...")
+        
+        # Find the ramp constraint key by searching through constraint keys
+        constraint_keys = collect(keys(container.constraints))
+        ramp_keys = [k for k in constraint_keys if occursin("RampConstraint", string(k))]
+        
+        if length(ramp_keys) > 0
+            # Find the ramp down constraint key
+            ramp_dn_key = nothing
+            for key in ramp_keys
+                if occursin("\"dn\"", string(key)) || occursin("dn", string(key))
+                    ramp_dn_key = key
+                    break
+                end
+            end
+            
+            if ramp_dn_key !== nothing
+                ramp_constraints_dn = container.constraints[ramp_dn_key]
+                for gen in nuclear_gens
+                    name = get_name(gen)
+                    try
+                        if name in first(axes(ramp_constraints_dn))
+                            con2 = ramp_constraints_dn[name, 2]
+                            con2_obj = JuMP.constraint_object(con2)
+                            constraint_str = string(con2_obj)
+                            if occursin("RateofChangeConstraintSlack", constraint_str) || occursin("slack", lowercase(constraint_str))
+                                println("    ⚠️  WARNING: Constraint for $name contains slack variable terms!")
+                                println("    Constraint: $constraint_str")
+                            else
+                                println("    ✓ Constraint for $name does NOT contain slack terms")
+                            end
+                        end
+                    catch e
+                        println("    Could not check constraint for $name: $e")
+                    end
+                end
+            else
+                println("    ⚠️  No 'dn' ramp constraint key found")
+            end
+        else
+            println("    ⚠️  No ramp constraints found in container")
+        end
+        
+    catch e
+        println("ERROR checking slack variables: $e")
+        println("  Stacktrace:")
+        for (exc, bt) in Base.catch_stack()
+            showerror(stdout, exc, bt)
+            println()
+        end
+    end
 catch e
     println("  ✗ Model solve failed: $e")
     println("  The issue is likely a constraint violation (e.g., power balance, storage, hydro, or ramp constraints).")
@@ -1516,185 +1837,6 @@ if objective !== nothing
         end
     end
     
-    # ============================================================================
-    # POST-OPTIMIZATION STORAGE DISPATCH VALIDATION
-    # ============================================================================
-    println("\n" * "="^80)
-    println("VALIDATING STORAGE DISPATCH (ACTUAL VALUES) AT FIRST TIMESTEP")
-    println("="^80)
-    try
-        # Get storage dispatch from optimization results
-        local storage_units = collect(get_components(EnergyReservoirStorage, sys))
-        
-        if !isempty(storage_units) && results !== nothing
-            # Get first timestep
-            try
-                time_steps = get_time_steps(results)
-                first_ts = first(time_steps)
-            catch
-                # Fallback: get time steps from storage dispatch data
-                time_steps = nothing
-                try
-                    storage_out_df = read_variable(results, ActivePowerOutVariable, EnergyReservoirStorage, table_format=TableFormat.LONG)
-                    if !isempty(storage_out_df)
-                        time_steps = unique(storage_out_df.DateTime)
-                    end
-                catch
-                    try
-                        storage_in_df = read_variable(results, ActivePowerInVariable, EnergyReservoirStorage, table_format=TableFormat.LONG)
-                        if !isempty(storage_in_df)
-                            time_steps = unique(storage_in_df.DateTime)
-                        end
-                    catch
-                    end
-                end
-                
-                if time_steps === nothing || isempty(time_steps)
-                    println("  Could not determine time steps from storage dispatch")
-                    first_ts = nothing
-                else
-                    first_ts = first(time_steps)
-                end
-            end
-            
-            if first_ts === nothing
-                println("  Skipping storage dispatch validation - could not determine first timestep")
-            else
-                # Calculate total storage dispatch at first timestep
-            total_sienna_discharge = 0.0
-            total_sienna_charge = 0.0
-            storage_dispatch_details = []
-            
-            # Read discharge (ActivePowerOutVariable)
-            try
-                storage_out_df = read_variable(results, ActivePowerOutVariable, EnergyReservoirStorage, table_format=TableFormat.LONG)
-                if !isempty(storage_out_df)
-                    storage_out_ts1 = filter(row -> row.DateTime == first_ts, storage_out_df)
-                    for row in eachrow(storage_out_ts1)
-                        if row.value > 0
-                            total_sienna_discharge += row.value
-                            push!(storage_dispatch_details, (
-                                name = row.name,
-                                discharge_mw = row.value,
-                                charge_mw = 0.0
-                            ))
-                        end
-                    end
-                end
-            catch e
-                println("  Could not read storage discharge: $e")
-            end
-            
-            # Read charge (ActivePowerInVariable)
-            try
-                storage_in_df = read_variable(results, ActivePowerInVariable, EnergyReservoirStorage, table_format=TableFormat.LONG)
-                if !isempty(storage_in_df)
-                    storage_in_ts1 = filter(row -> row.DateTime == first_ts, storage_in_df)
-                    for row in eachrow(storage_in_ts1)
-                        if row.value > 0
-                            total_sienna_charge += row.value
-                            # Update or add to storage_dispatch_details
-                            found = false
-                            for i in 1:length(storage_dispatch_details)
-                                if storage_dispatch_details[i].name == row.name
-                                    storage_dispatch_details[i] = (
-                                        name = row.name,
-                                        discharge_mw = storage_dispatch_details[i].discharge_mw,
-                                        charge_mw = row.value
-                                    )
-                                    found = true
-                                    break
-                                end
-                            end
-                            if !found
-                                push!(storage_dispatch_details, (
-                                    name = row.name,
-                                    discharge_mw = 0.0,
-                                    charge_mw = row.value
-                                ))
-                            end
-                        end
-                    end
-                end
-            catch e
-                println("  Could not read storage charge: $e")
-            end
-            
-            println("\nSienna storage dispatch at first timestep:")
-            println("  Total discharge: $(@sprintf("%.2f", total_sienna_discharge)) MW")
-            println("  Total charge: $(@sprintf("%.2f", total_sienna_charge)) MW")
-            
-            # Check for simultaneous charge/discharge (should not happen with reservation=true)
-            simultaneous_count = 0
-            for detail in storage_dispatch_details
-                if detail.discharge_mw > 0.01 && detail.charge_mw > 0.01
-                    simultaneous_count += 1
-                    println("  ⚠️  WARNING: $(detail.name) is both charging ($(@sprintf("%.2f", detail.charge_mw)) MW) and discharging ($(@sprintf("%.2f", detail.discharge_mw)) MW) simultaneously!")
-                end
-            end
-            if simultaneous_count == 0
-                println("  ✓ No simultaneous charge/discharge detected (mutual exclusivity enforced)")
-            end
-            
-            # Compare with PyPSA dispatch
-            pypsa_dispatch_file = joinpath(@__DIR__, "test_output", "pypsa_dispatch.csv")
-            if isfile(pypsa_dispatch_file)
-                try
-                    pypsa_df = CSV.read(pypsa_dispatch_file, DataFrame)
-                    first_ts_pypsa = first(unique(pypsa_df.DateTime))
-                    
-                    # Filter for storage carriers
-                    storage_rows = filter(row -> occursin("storage", lowercase(row.carrier)) || 
-                                                occursin("battery", lowercase(row.carrier)) ||
-                                                row.carrier == "battery", pypsa_df)
-                    storage_rows_ts1 = filter(row -> row.DateTime == first_ts_pypsa, storage_rows)
-                    
-                    if !isempty(storage_rows_ts1)
-                        # Separate charge (negative) and discharge (positive)
-                        pypsa_storage_discharge = sum(filter(row -> row.value > 0, storage_rows_ts1).value)
-                        pypsa_storage_charge = abs(sum(filter(row -> row.value < 0, storage_rows_ts1).value))
-                        
-                        println("\n" * "-"^80)
-                        println("COMPARISON WITH PyPSA (ACTUAL DISPATCH):")
-                        println("  Sienna storage discharge (TS1): $(@sprintf("%.2f", total_sienna_discharge)) MW")
-                        println("  PyPSA storage discharge (TS1): $(@sprintf("%.2f", pypsa_storage_discharge)) MW")
-                        println("  Sienna storage charge (TS1): $(@sprintf("%.2f", total_sienna_charge)) MW")
-                        println("  PyPSA storage charge (TS1): $(@sprintf("%.2f", pypsa_storage_charge)) MW")
-                        
-                        discharge_diff = abs(total_sienna_discharge - pypsa_storage_discharge)
-                        charge_diff = abs(total_sienna_charge - pypsa_storage_charge)
-                        
-                        if discharge_diff > 0.01 || charge_diff > 0.01
-                            println("  ⚠️  WARNING: Mismatch detected!")
-                            println("    Discharge difference: $(@sprintf("%.2f", discharge_diff)) MW")
-                            println("    Charge difference: $(@sprintf("%.2f", charge_diff)) MW")
-                        else
-                            println("  ✓ Match within tolerance (0.01 MW)")
-                        end
-                    else
-                        println("\n  (No storage dispatch found in PyPSA file for comparison)")
-                    end
-                catch e
-                    println("\n  Could not read PyPSA dispatch file for comparison: $e")
-                end
-            else
-                println("\n  (PyPSA dispatch file not found for comparison)")
-            end
-            end  # End of if first_ts !== nothing
-        else
-            println("  No storage units found or optimization results not available")
-        end
-        
-    catch e
-        println("ERROR: Could not validate storage dispatch: $e")
-        println("  Stacktrace:")
-        for (exc, bt) in Base.catch_stack()
-            showerror(stdout, exc, bt)
-            println()
-        end
-    end
-    
-    println("="^80)
     
     # ============================================================================
     # HYDRO DISPATCH DIAGNOSTIC COMPARISON

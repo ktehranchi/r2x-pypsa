@@ -302,10 +302,71 @@ def test_end_to_end_pypsa_to_psy_conversion():
 
 
 def test_e2e_economic_dispatch():
-    """Test end-to-end conversion from PyPSA to PSY system."""
+    """Test end-to-end conversion from PyPSA to PSY system.
+    
+    To enable network clustering (copper plate), set environment variable:
+        CLUSTER_NETWORK=1 pytest tests/test_end_to_end.py::test_e2e_economic_dispatch
+    """
     # Use the test data
     test_file = Path("tests/data/elec_s380_c7a_ec_lv1.5_RPS-REM-TCT-1h_E.nc")
     network = pypsa.Network(test_file)
+
+    # Optional: Cluster network to make it a copper plate
+    cluster_network = os.getenv("CLUSTER_NETWORK", "0").lower() in ("1", "true", "yes")
+    if cluster_network:
+        logger.info("=" * 80)
+        logger.info("CLUSTERING NETWORK TO COPPER PLATE")
+        logger.info("=" * 80)
+        
+        # Get busmap from interconnect
+        if 'interconnect' in network.buses.columns:
+            busmap = network.buses.interconnect
+            logger.info(f"Using interconnect as busmap")
+            logger.info(f"  Unique interconnects: {busmap.unique()}")
+        else:
+            logger.warning("Network buses do not have 'interconnect' column. Skipping clustering.")
+            cluster_network = False
+        
+        if cluster_network:
+            # Drop columns that might interfere with clustering
+            cols_to_drop = ['Pd', 'country', 'reeds_zone']
+            for col in cols_to_drop:
+                if col in network.buses.columns:
+                    network.buses.drop(columns=col, inplace=True)
+                    logger.info(f"Dropped column '{col}' from buses")
+            
+            # Cluster the network
+            try:
+                original_bus_count = len(network.buses)
+                # Try the cluster_by_busmap method (if available)
+                if hasattr(network, 'cluster') and hasattr(network.cluster, 'cluster_by_busmap'):
+                    clustered_network = network.cluster.cluster_by_busmap(busmap)
+                    network = clustered_network
+                else:
+                    # Alternative: use pypsa.clustering.spatial.get_clustering_from_busmap
+                    try:
+                        from pypsa.clustering.spatial import get_clustering_from_busmap
+                        clustering = get_clustering_from_busmap(
+                            network,
+                            busmap,
+                            aggregate_generators_weighted=True,
+                            aggregate_one_ports=["Load", "StorageUnit"],
+                        )
+                        network = clustering.network
+                    except ImportError:
+                        logger.error("PyPSA clustering module not available. Cannot cluster network.")
+                        raise
+                
+                logger.info(f"Network clustered successfully")
+                logger.info(f"  Original buses: {original_bus_count}")
+                logger.info(f"  Clustered buses: {len(network.buses)}")
+            except Exception as e:
+                logger.error(f"Failed to cluster network: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+                logger.warning("Continuing with original network (not clustered)")
+        
+        logger.info("=" * 80)
 
     # Check if PyPSA is using copper plate or nodal balance
     logger.info("=" * 80)
@@ -348,9 +409,9 @@ def test_e2e_economic_dispatch():
     # Remember our load is for 2030, so lets reduce the system load for the sake of this simulation feasibility
     network.loads_t.p_set *= 0.75 
     
-    # ENABLE storage units to test if they fix power balance
+    # ENABLE storage units
     logger.info("=" * 80)
-    logger.info("ENABLING STORAGE UNITS TO TEST POWER BALANCE")
+    logger.info("ENABLING STORAGE UNITS")
     logger.info("=" * 80)
     if hasattr(network, 'storage_units') and len(network.storage_units) > 0:
         storage_count = len(network.storage_units)
@@ -360,6 +421,21 @@ def test_e2e_economic_dispatch():
         store_count = len(network.stores)
         network.stores['active'] = True  # Enable stores
         logger.info(f"Enabled {store_count} stores (set active=True)")
+    logger.info("=" * 80)
+    
+    # DISABLE NUCLEAR GENERATORS
+    logger.info("=" * 80)
+    logger.info("DISABLING NUCLEAR GENERATORS")
+    logger.info("=" * 80)
+    if hasattr(network, 'generators') and len(network.generators) > 0:
+        nuclear_gens = network.generators[network.generators.carrier == 'nuclear']
+        if len(nuclear_gens) > 0:
+            nuclear_count = len(nuclear_gens)
+            nuclear_capacity = nuclear_gens.p_nom.sum()
+            network.generators.loc[nuclear_gens.index, 'active'] = False
+            logger.info(f"Disabled {nuclear_count} nuclear generators ({nuclear_capacity:.2f} MW total capacity)")
+        else:
+            logger.info("No nuclear generators found in network")
     logger.info("=" * 80)
     
     # Set all capital costs to zero to ensure pure economic dispatch (operational costs only)
@@ -612,27 +688,15 @@ def test_e2e_economic_dispatch():
     )
 
     # Convert all PyPSA components to PSY components
-    # TEMPORARY: Skip storage components for testing
-    from r2x_pypsa.models.storage_unit import PypsaStorageUnit
-    from r2x_pypsa.models.store import PypsaStore
-    
+       # Convert all PyPSA components to PSY components (including storage)
     conversion_failures = 0
-    storage_skipped = 0
     for component in pypsa_system._component_mgr.iter_all():
-        # Skip storage components for testing
-        if isinstance(component, (PypsaStorageUnit, PypsaStore)):
-            storage_skipped += 1
-            logger.debug(f"Skipping storage component {component.name} for testing")
-            continue
         try:
             pypsa_component_to_psy(component, pypsa_system, psy_system, mapping)
         except Exception as e:
             logger.warning(f"Failed to convert component {component.name}: {e}")
             conversion_failures += 1
             continue
-    
-    if storage_skipped > 0:
-        logger.info(f"Skipped {storage_skipped} storage components during conversion (testing without storage)")
 
     # Serialize the PSY system to Sienna format
     # (output_dir already created above)
@@ -918,11 +982,21 @@ def test_compare_pypsa_sienna_systems():
                         # Get first and last values
                         first_soc = soc_ts[su_name].iloc[0] if len(soc_ts) > 0 else None
                         last_soc = soc_ts[su_name].iloc[-1] if len(soc_ts) > 0 else None
-                        logger.info(f"  state_of_charge time series:")
+                        first_soc_fraction = (first_soc / storage_capacity) if first_soc is not None and storage_capacity > 0 else None
+                        logger.info(f"  state_of_charge time series (OPTIMIZED):")
                         if first_soc is not None:
-                            logger.info(f"    First value: {first_soc:.2f} MWh")
+                            logger.info(f"    First value (optimized): {first_soc:.2f} MWh ({first_soc_fraction*100:.2f}% of capacity)")
+                            logger.info(f"    ⚠️  NOTE: With cyclic_state_of_charge_per_period=True, PyPSA optimized initial SOC")
+                            logger.info(f"       Static parameter state_of_charge_initial={state_of_charge_initial:.2f} MWh was IGNORED")
+                            logger.info(f"       Actual optimized initial SOC={first_soc:.2f} MWh should be used for Sienna!")
                         if last_soc is not None:
                             logger.info(f"    Last value: {last_soc:.2f} MWh")
+                            if first_soc is not None:
+                                diff = abs(first_soc - last_soc)
+                                if diff < 0.01:
+                                    logger.info(f"    ✓ Initial ≈ Final (cyclic constraint satisfied, diff={diff:.4f} MWh)")
+                                else:
+                                    logger.warning(f"    ⚠️  Initial ≠ Final (diff={diff:.4f} MWh) - cyclic constraint may not be satisfied")
         
         # Summary
         logger.info("\n" + "=" * 80)
@@ -931,9 +1005,25 @@ def test_compare_pypsa_sienna_systems():
         total_initial_soc = network.storage_units.get('state_of_charge_initial', pd.Series([0.0])).sum()
         total_capacity = (network.storage_units.p_nom * network.storage_units.max_hours).sum()
         avg_initial_soc = (total_initial_soc / total_capacity) if total_capacity > 0 else 0.0
-        logger.info(f"Total initial SOC: {total_initial_soc:.2f} MWh")
+        logger.info(f"Total initial SOC (static parameter): {total_initial_soc:.2f} MWh")
         logger.info(f"Total storage capacity: {total_capacity:.2f} MWh")
-        logger.info(f"Average initial SOC fraction: {avg_initial_soc:.4f} ({avg_initial_soc*100:.2f}%)")
+        logger.info(f"Average initial SOC fraction (static): {avg_initial_soc:.4f} ({avg_initial_soc*100:.2f}%)")
+        
+        # Check if we have optimized SOC values (after optimization)
+        if hasattr(network, 'storage_units_t') and hasattr(network.storage_units_t, 'state_of_charge'):
+            soc_ts = network.storage_units_t.state_of_charge
+            if len(soc_ts) > 0:
+                # Get first timestep SOC for all storage units
+                first_soc_values = soc_ts.iloc[0]
+                total_optimized_soc = first_soc_values.sum()
+                avg_optimized_soc = (total_optimized_soc / total_capacity) if total_capacity > 0 else 0.0
+                logger.info(f"Total initial SOC (OPTIMIZED, from time series): {total_optimized_soc:.2f} MWh")
+                logger.info(f"Average initial SOC fraction (OPTIMIZED): {avg_optimized_soc:.4f} ({avg_optimized_soc*100:.2f}%)")
+                if abs(total_initial_soc - total_optimized_soc) > 0.01:
+                    logger.warning(f"⚠️  MISMATCH: Static parameter ({total_initial_soc:.2f} MWh) ≠ Optimized ({total_optimized_soc:.2f} MWh)")
+                    logger.warning(f"   This is expected if cyclic_state_of_charge_per_period=True - PyPSA optimizes initial SOC")
+                    logger.warning(f"   Sienna should use the OPTIMIZED value, not the static parameter!")
+        
         logger.info("=" * 80)
     else:
         pypsa_storage_capacity = 0.0
@@ -1339,6 +1429,79 @@ def test_compare_pypsa_sienna_systems():
 
     # Compare battery parameters in detail
     compare_battery_parameters(network, json_file, h5_file)
+    
+    # DIAGNOSE: Compare PyPSA vs Sienna initial SOC
+    logger.info("\n" + "=" * 80)
+    logger.info("DIAGNOSIS: PyPSA vs Sienna Initial State of Charge Comparison")
+    logger.info("=" * 80)
+    
+    if hasattr(network, 'storage_units') and len(network.storage_units) > 0 and len(sienna_storage) > 0:
+        # Create mapping by name
+        sienna_by_name = {s.get('name'): s for s in sienna_storage}
+        
+        for su_name, su_data in network.storage_units.iterrows():
+            p_nom = su_data.get('p_nom', 0.0)
+            max_hours = su_data.get('max_hours', 1.0)
+            storage_capacity = p_nom * max_hours  # MWh
+            state_of_charge_initial = su_data.get('state_of_charge_initial', 0.0)  # MWh
+            cyclic_state_of_charge_per_period = su_data.get('cyclic_state_of_charge_per_period', True)
+            
+            # Get PyPSA optimized initial SOC (if available)
+            pypsa_optimized_soc = None
+            pypsa_optimized_soc_fraction = None
+            if hasattr(network, 'storage_units_t') and hasattr(network.storage_units_t, 'state_of_charge'):
+                soc_ts = network.storage_units_t.state_of_charge
+                if su_name in soc_ts.columns and len(soc_ts) > 0:
+                    pypsa_optimized_soc = float(soc_ts[su_name].iloc[0])
+                    pypsa_optimized_soc_fraction = pypsa_optimized_soc / storage_capacity if storage_capacity > 0 else 0.0
+            
+            # Get Sienna initial SOC
+            sienna_storage_unit = sienna_by_name.get(su_name)
+            if sienna_storage_unit:
+                sienna_base_power = sienna_storage_unit.get('base_power', 100.0)
+                sienna_storage_capacity_pu = sienna_storage_unit.get('storage_capacity', 0.0)
+                sienna_storage_capacity_mwh = sienna_storage_capacity_pu * sienna_base_power
+                sienna_soc_fraction = sienna_storage_unit.get('initial_storage_capacity_level', 0.0)
+                sienna_soc_mwh = sienna_soc_fraction * sienna_storage_capacity_mwh
+                
+                logger.info(f"\n{su_name}:")
+                logger.info(f"  Storage capacity: {storage_capacity:.2f} MWh (PyPSA), {sienna_storage_capacity_mwh:.2f} MWh (Sienna)")
+                logger.info(f"  PyPSA static state_of_charge_initial: {state_of_charge_initial:.2f} MWh ({state_of_charge_initial/storage_capacity*100:.2f}%)")
+                if pypsa_optimized_soc is not None:
+                    logger.info(f"  PyPSA OPTIMIZED initial SOC: {pypsa_optimized_soc:.2f} MWh ({pypsa_optimized_soc_fraction*100:.2f}%)")
+                logger.info(f"  Sienna initial_storage_capacity_level: {sienna_soc_mwh:.2f} MWh ({sienna_soc_fraction*100:.2f}%)")
+                logger.info(f"  cyclic_state_of_charge_per_period: {cyclic_state_of_charge_per_period}")
+                
+                # Compare
+                if pypsa_optimized_soc is not None:
+                    # Compare optimized PyPSA vs Sienna
+                    diff_mwh = abs(pypsa_optimized_soc - sienna_soc_mwh)
+                    diff_pct = abs(pypsa_optimized_soc_fraction - sienna_soc_fraction) * 100
+                    if diff_mwh > 0.01 or diff_pct > 0.1:
+                        logger.warning(f"  ⚠️  MISMATCH: PyPSA optimized ({pypsa_optimized_soc:.2f} MWh) ≠ Sienna ({sienna_soc_mwh:.2f} MWh)")
+                        logger.warning(f"     Difference: {diff_mwh:.2f} MWh ({diff_pct:.2f}%)")
+                        if cyclic_state_of_charge_per_period:
+                            logger.warning(f"     ISSUE: With cyclic_state_of_charge_per_period=True, conversion should use")
+                            logger.warning(f"            PyPSA's OPTIMIZED initial SOC, not the static parameter!")
+                    else:
+                        logger.info(f"  ✓ Match: PyPSA optimized ≈ Sienna (diff={diff_mwh:.4f} MWh)")
+                else:
+                    # Compare static PyPSA vs Sienna
+                    pypsa_static_fraction = state_of_charge_initial / storage_capacity if storage_capacity > 0 else 0.0
+                    diff_mwh = abs(state_of_charge_initial - sienna_soc_mwh)
+                    diff_pct = abs(pypsa_static_fraction - sienna_soc_fraction) * 100
+                    if diff_mwh > 0.01 or diff_pct > 0.1:
+                        logger.warning(f"  ⚠️  MISMATCH: PyPSA static ({state_of_charge_initial:.2f} MWh) ≠ Sienna ({sienna_soc_mwh:.2f} MWh)")
+                        logger.warning(f"     Difference: {diff_mwh:.2f} MWh ({diff_pct:.2f}%)")
+                        if cyclic_state_of_charge_per_period:
+                            logger.warning(f"     NOTE: With cyclic_state_of_charge_per_period=True, PyPSA optimizes initial SOC")
+                            logger.warning(f"            but optimized values not available in storage_units_t.state_of_charge")
+                    else:
+                        logger.info(f"  ✓ Match: PyPSA static ≈ Sienna (diff={diff_mwh:.4f} MWh)")
+            else:
+                logger.warning(f"  ⚠️  {su_name}: Not found in Sienna storage units")
+    
+    logger.info("=" * 80)
 
     logger.info(f"Buses: {len(sienna_buses)}")
 

@@ -56,14 +56,14 @@ def plot_renewable_totals():
     sienna_load_totals.columns = ['DateTime', 'Sienna_Load_MW']
     sienna_load_totals = sienna_load_totals.sort_values('DateTime')
     
-    # Filter to 3rd day (hours 48-71, since day 1 is 0-23, day 2 is 24-47, day 3 is 48-71)
+    # Filter to first 4 days (hours 0-95, since 4 days * 24 hours = 96 hours, so 0-95 inclusive)
     start_datetime = pypsa_totals['DateTime'].min()
-    third_day_start = start_datetime + pd.Timedelta(hours=48)
-    third_day_end = start_datetime + pd.Timedelta(hours=71)
-    pypsa_totals = pypsa_totals[(pypsa_totals['DateTime'] >= third_day_start) & (pypsa_totals['DateTime'] <= third_day_end)].copy()
-    sienna_totals = sienna_totals[(sienna_totals['DateTime'] >= third_day_start) & (sienna_totals['DateTime'] <= third_day_end)].copy()
-    pypsa_load_totals = pypsa_load_totals[(pypsa_load_totals['DateTime'] >= third_day_start) & (pypsa_load_totals['DateTime'] <= third_day_end)].copy()
-    sienna_load_totals = sienna_load_totals[(sienna_load_totals['DateTime'] >= third_day_start) & (sienna_load_totals['DateTime'] <= third_day_end)].copy()
+    first_4_days_start = start_datetime
+    first_4_days_end = start_datetime + pd.Timedelta(hours=95)  # 4 days = 96 hours (0-95)
+    pypsa_totals = pypsa_totals[(pypsa_totals['DateTime'] >= first_4_days_start) & (pypsa_totals['DateTime'] <= first_4_days_end)].copy()
+    sienna_totals = sienna_totals[(sienna_totals['DateTime'] >= first_4_days_start) & (sienna_totals['DateTime'] <= first_4_days_end)].copy()
+    pypsa_load_totals = pypsa_load_totals[(pypsa_load_totals['DateTime'] >= first_4_days_start) & (pypsa_load_totals['DateTime'] <= first_4_days_end)].copy()
+    sienna_load_totals = sienna_load_totals[(sienna_load_totals['DateTime'] >= first_4_days_start) & (sienna_load_totals['DateTime'] <= first_4_days_end)].copy()
     
     logger.info(f"PyPSA renewable data points: {len(pypsa_totals)}")
     logger.info(f"Sienna renewable data points: {len(sienna_totals)}")
@@ -107,7 +107,7 @@ def plot_renewable_totals():
     
     plt.xlabel('DateTime', fontsize=12)
     plt.ylabel('Power (MW)', fontsize=12)
-    plt.title('Renewable Dispatch and Load: PyPSA vs Sienna (Third Day)', fontsize=14, fontweight='bold')
+    plt.title('Renewable Dispatch and Load: PyPSA vs Sienna (First 4 Days)', fontsize=14, fontweight='bold')
     plt.legend(fontsize=11, loc='best')
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
@@ -134,16 +134,148 @@ def plot_renewable_totals():
         logger.info(f"  Min: {diff.min():.2f} MW")
         logger.info(f"  Total energy difference: {diff.sum():.2f} MWh")
     
-    # Check total generation vs load for day 3
+    # Print nuclear time series for first day
+    print_nuclear_time_series(pypsa_df, sienna_df, first_4_days_start)
+    
+    # Check total generation vs load for first 4 days
     test_file = Path("tests/data/elec_s380_c7a_ec_lv1.5_RPS-REM-TCT-1h_E.nc")
-    check_total_generation_vs_load(pypsa_df, sienna_df, third_day_start, third_day_end, test_file)
+    check_total_generation_vs_load(pypsa_df, sienna_df, first_4_days_start, first_4_days_end, test_file)
 
 
-def check_total_generation_vs_load(pypsa_df, sienna_df, third_day_start, third_day_end, network_file):
-    """Check if PyPSA total generation exceeds total load for day 3."""
+def print_nuclear_time_series(pypsa_df, sienna_df, start_datetime):
+    """Print nuclear generator time series for the first day, side by side."""
+    
+    logger.info("\n" + "=" * 100)
+    logger.info("NUCLEAR GENERATOR TIME SERIES - FIRST DAY (24 HOURS)")
+    logger.info("=" * 100)
+    
+    # Filter to first day (24 hours)
+    first_day_end = start_datetime + pd.Timedelta(hours=23)
+    pypsa_day1 = pypsa_df[(pypsa_df['DateTime'] >= start_datetime) & 
+                          (pypsa_df['DateTime'] <= first_day_end)].copy()
+    sienna_day1 = sienna_df[(sienna_df['DateTime'] >= start_datetime) & 
+                            (sienna_df['DateTime'] <= first_day_end)].copy()
+    
+    # Filter for nuclear generators
+    # PyPSA uses 'nuclear' as carrier
+    pypsa_nuclear = pypsa_day1[pypsa_day1['carrier'] == 'nuclear'].copy()
+    # Sienna uses 'ST' (Steam Turbine) with 'NUCLEAR' fuel, but carrier might be different
+    # Check what carrier Sienna uses for nuclear
+    sienna_nuclear_carriers = ['ST', 'nuclear', 'Nuclear', 'NUCLEAR']
+    sienna_nuclear = sienna_day1[sienna_day1['carrier'].isin(sienna_nuclear_carriers)].copy()
+    
+    if len(pypsa_nuclear) == 0:
+        logger.warning("No PyPSA nuclear generators found in dispatch data")
+        return
+    
+    if len(sienna_nuclear) == 0:
+        logger.warning("No Sienna nuclear generators found in dispatch data")
+        # Try to find by name pattern
+        nuclear_names = pypsa_nuclear['name'].unique()
+        logger.info(f"PyPSA nuclear generator names: {list(nuclear_names)}")
+        # Check if any Sienna generators match nuclear names
+        for name in nuclear_names:
+            matching = sienna_day1[sienna_day1['name'].str.contains(name, case=False, na=False)]
+            if len(matching) > 0:
+                logger.info(f"Found Sienna generator matching '{name}': {matching['carrier'].unique()}")
+                sienna_nuclear = pd.concat([sienna_nuclear, matching])
+    
+    # Group by generator name and sum if multiple entries per timestamp
+    pypsa_nuclear_grouped = pypsa_nuclear.groupby(['DateTime', 'name'])['value'].sum().reset_index()
+    sienna_nuclear_grouped = sienna_nuclear.groupby(['DateTime', 'name'])['value'].sum().reset_index()
+    
+    # Get all unique nuclear generator names
+    pypsa_nuclear_names = sorted(pypsa_nuclear_grouped['name'].unique())
+    sienna_nuclear_names = sorted(sienna_nuclear_grouped['name'].unique())
+    
+    logger.info(f"\nPyPSA nuclear generators: {len(pypsa_nuclear_names)}")
+    for name in pypsa_nuclear_names:
+        gen_data = pypsa_nuclear_grouped[pypsa_nuclear_grouped['name'] == name]
+        logger.info(f"  {name}: {len(gen_data)} timesteps, capacity: {gen_data['value'].max():.2f} MW")
+    
+    logger.info(f"\nSienna nuclear generators: {len(sienna_nuclear_names)}")
+    for name in sienna_nuclear_names:
+        gen_data = sienna_nuclear_grouped[sienna_nuclear_grouped['name'] == name]
+        logger.info(f"  {name}: {len(gen_data)} timesteps, capacity: {gen_data['value'].max():.2f} MW")
+    
+    # For each nuclear generator, print time series side by side
+    # Match generators by name
+    all_nuclear_names = sorted(set(pypsa_nuclear_names) | set(sienna_nuclear_names))
+    
+    for gen_name in all_nuclear_names:
+        logger.info("\n" + "-" * 100)
+        logger.info(f"NUCLEAR GENERATOR: {gen_name}")
+        logger.info("-" * 100)
+        
+        # Get PyPSA data for this generator
+        pypsa_gen = pypsa_nuclear_grouped[pypsa_nuclear_grouped['name'] == gen_name].copy()
+        pypsa_gen = pypsa_gen.sort_values('DateTime')
+        
+        # Get Sienna data for this generator
+        sienna_gen = sienna_nuclear_grouped[sienna_nuclear_grouped['name'] == gen_name].copy()
+        sienna_gen = sienna_gen.sort_values('DateTime')
+        
+        # Create a merged DataFrame for side-by-side comparison
+        comparison = pd.merge(
+            pypsa_gen[['DateTime', 'value']].rename(columns={'value': 'PyPSA_MW'}),
+            sienna_gen[['DateTime', 'value']].rename(columns={'value': 'Sienna_MW'}),
+            on='DateTime',
+            how='outer'
+        )
+        comparison = comparison.sort_values('DateTime')
+        comparison = comparison.fillna(0.0)  # Fill missing values with 0
+        
+        # Calculate difference
+        comparison['Difference_MW'] = comparison['PyPSA_MW'] - comparison['Sienna_MW']
+        comparison['Ramp_Down_MW'] = comparison['PyPSA_MW'].diff().abs()  # Change from previous hour
+        
+        # Print header
+        logger.info(f"{'DateTime':<20} {'PyPSA (MW)':<15} {'Sienna (MW)':<15} {'Diff (MW)':<15} {'Ramp Down (MW)':<15}")
+        logger.info("-" * 100)
+        
+        # Print each hour
+        for _, row in comparison.iterrows():
+            logger.info(f"{str(row['DateTime']):<20} "
+                       f"{row['PyPSA_MW']:>14.2f} "
+                       f"{row['Sienna_MW']:>14.2f} "
+                       f"{row['Difference_MW']:>14.2f} "
+                       f"{row['Ramp_Down_MW']:>14.2f}")
+        
+        # Print summary
+        logger.info("-" * 100)
+        logger.info(f"Summary for {gen_name}:")
+        logger.info(f"  PyPSA - Mean: {comparison['PyPSA_MW'].mean():.2f} MW, "
+                   f"Max: {comparison['PyPSA_MW'].max():.2f} MW, "
+                   f"Min: {comparison['PyPSA_MW'].min():.2f} MW")
+        logger.info(f"  Sienna - Mean: {comparison['Sienna_MW'].mean():.2f} MW, "
+                   f"Max: {comparison['Sienna_MW'].max():.2f} MW, "
+                   f"Min: {comparison['Sienna_MW'].min():.2f} MW")
+        logger.info(f"  Difference - Mean: {comparison['Difference_MW'].mean():.2f} MW, "
+                   f"Max: {comparison['Difference_MW'].max():.2f} MW, "
+                   f"Min: {comparison['Difference_MW'].min():.2f} MW")
+        logger.info(f"  PyPSA Max Ramp Down: {comparison['Ramp_Down_MW'].max():.2f} MW/h")
+        
+        # Calculate ramp down periods (when power decreases)
+        pypsa_ramp_down = comparison['PyPSA_MW'].diff()
+        sienna_ramp_down = comparison['Sienna_MW'].diff()
+        ramp_down_periods = comparison[pypsa_ramp_down < 0].copy()
+        if len(ramp_down_periods) > 0:
+            logger.info(f"\n  Ramp Down Periods (PyPSA decreasing):")
+            for _, row in ramp_down_periods.iterrows():
+                prev_idx = comparison.index[comparison.index < comparison.index[comparison['DateTime'] == row['DateTime']].tolist()[0]]
+                if len(prev_idx) > 0:
+                    prev_row = comparison.loc[prev_idx[-1]]
+                    ramp_amount = row['PyPSA_MW'] - prev_row['PyPSA_MW']
+                    logger.info(f"    {row['DateTime']}: {prev_row['PyPSA_MW']:.2f} → {row['PyPSA_MW']:.2f} MW "
+                               f"(Δ={ramp_amount:.2f} MW, Sienna: {prev_row['Sienna_MW']:.2f} → {row['Sienna_MW']:.2f} MW, "
+                               f"Δ={row['Sienna_MW'] - prev_row['Sienna_MW']:.2f} MW)")
+
+
+def check_total_generation_vs_load(pypsa_df, sienna_df, start_datetime, end_datetime, network_file):
+    """Check if PyPSA total generation exceeds total load for the specified time period."""
     
     logger.info("\n" + "=" * 80)
-    logger.info("TOTAL GENERATION VS LOAD CHECK - DAY 3")
+    logger.info("TOTAL GENERATION VS LOAD CHECK - FIRST 4 DAYS")
     logger.info("=" * 80)
     
     # Load PyPSA network to get load data
@@ -171,13 +303,13 @@ def check_total_generation_vs_load(pypsa_df, sienna_df, third_day_start, third_d
     if hasattr(network, 'stores') and len(network.stores) > 0:
         network.stores['active'] = False
     
-    # Filter to 3rd day
-    pypsa_day3 = pypsa_df[(pypsa_df['DateTime'] >= third_day_start) & 
-                          (pypsa_df['DateTime'] <= third_day_end)].copy()
-    sienna_day3 = sienna_df[(sienna_df['DateTime'] >= third_day_start) & 
-                           (sienna_df['DateTime'] <= third_day_end)].copy()
+    # Filter to first 4 days
+    pypsa_day3 = pypsa_df[(pypsa_df['DateTime'] >= start_datetime) & 
+                          (pypsa_df['DateTime'] <= end_datetime)].copy()
+    sienna_day3 = sienna_df[(sienna_df['DateTime'] >= start_datetime) & 
+                           (sienna_df['DateTime'] <= end_datetime)].copy()
     
-    logger.info(f"Day 3 range: {third_day_start} to {third_day_end}")
+    logger.info(f"First 4 days range: {start_datetime} to {end_datetime}")
     logger.info(f"PyPSA data points: {len(pypsa_day3)}")
     logger.info(f"Sienna data points: {len(sienna_day3)}")
     
@@ -222,7 +354,7 @@ def check_total_generation_vs_load(pypsa_df, sienna_df, third_day_start, third_d
             else:
                 datetime_snapshots = pd.to_datetime(all_snapshots)
             
-            day3_snapshots = all_snapshots[(datetime_snapshots >= third_day_start) & (datetime_snapshots <= third_day_end)]
+            day3_snapshots = all_snapshots[(datetime_snapshots >= start_datetime) & (datetime_snapshots <= end_datetime)]
             
             if len(day3_snapshots) > 0:
                 # Optimize only for day 3 (faster)
@@ -246,7 +378,7 @@ def check_total_generation_vs_load(pypsa_df, sienna_df, third_day_start, third_d
             else:
                 datetime_snapshots = pd.to_datetime(all_snapshots)
             
-            day3_snapshots = all_snapshots[(datetime_snapshots >= third_day_start) & (datetime_snapshots <= third_day_end)]
+            day3_snapshots = all_snapshots[(datetime_snapshots >= start_datetime) & (datetime_snapshots <= end_datetime)]
             
             if len(day3_snapshots) > 0:
                 # Get Link p0 (power at bus0, positive = consuming from bus0)
@@ -378,7 +510,7 @@ def check_total_generation_vs_load(pypsa_df, sienna_df, third_day_start, third_d
             else:
                 datetime_snapshots = pd.to_datetime(all_snapshots)
             
-            day3_snapshots = all_snapshots[(datetime_snapshots >= third_day_start) & (datetime_snapshots <= third_day_end)]
+            day3_snapshots = all_snapshots[(datetime_snapshots >= start_datetime) & (datetime_snapshots <= end_datetime)]
             
             if len(day3_snapshots) > 0:
                 # Optimize only for day 3 (faster)
@@ -402,7 +534,7 @@ def check_total_generation_vs_load(pypsa_df, sienna_df, third_day_start, third_d
             else:
                 datetime_snapshots = pd.to_datetime(all_snapshots)
             
-            day3_snapshots = all_snapshots[(datetime_snapshots >= third_day_start) & (datetime_snapshots <= third_day_end)]
+            day3_snapshots = all_snapshots[(datetime_snapshots >= start_datetime) & (datetime_snapshots <= end_datetime)]
             
             if len(day3_snapshots) > 0:
                 # Get line power flows
@@ -506,7 +638,7 @@ def check_total_generation_vs_load(pypsa_df, sienna_df, third_day_start, third_d
     
     # Print results
     logger.info("\n" + "=" * 80)
-    logger.info("PYPSA POWER BALANCE (Day 3)")
+    logger.info("PYPSA POWER BALANCE (First 4 Days)")
     logger.info("=" * 80)
     logger.info(f"{'DateTime':<20} {'Gen (MW)':<12} {'Batt Chg (MW)':<15} {'Net Gen (MW)':<15} {'Load (MW)':<12} {'Net Gen-Load (MW)':<20} {'Exceeds?':<10}")
     logger.info("-" * 80)
@@ -539,7 +671,7 @@ def check_total_generation_vs_load(pypsa_df, sienna_df, third_day_start, third_d
         logger.warning("PyPSA: No valid differences (all NaN)")
     
     logger.info("\n" + "=" * 80)
-    logger.info("SIENNA POWER BALANCE (Day 3)")
+    logger.info("SIENNA POWER BALANCE (First 4 Days)")
     logger.info("=" * 80)
     logger.info(f"{'DateTime':<20} {'Generation (MW)':<18} {'Load (MW)':<15} {'Difference (MW)':<18} {'Exceeds?':<10}")
     logger.info("-" * 80)

@@ -182,6 +182,43 @@ def create_minmax_from_pypsa(min_value: float, max_value: float, base_value: flo
     )
 
 
+def create_updown_from_pypsa(
+    ramp_up_pu_per_hour: float, 
+    ramp_down_pu_per_hour: float, 
+    rating_pu: float,
+    base_value: float = 1.0
+) -> "UpDown":
+    """Create an UpDown object from PyPSA ramp limit values.
+    
+    Converts PyPSA ramp limits (per-unit per hour relative to p_nom) to 
+    Sienna ramp limits (per-unit per minute relative to base_power).
+    
+    Parameters
+    ----------
+    ramp_up_pu_per_hour : float
+        Ramp up limit in per-unit per hour (PyPSA format)
+    ramp_down_pu_per_hour : float
+        Ramp down limit in per-unit per hour (PyPSA format)
+    rating_pu : float
+        Generator rating in per-unit (p_nom / base_power)
+    base_value : float
+        Base value for per unit conversion (default: 1.0, not used but kept for consistency)
+    
+    Returns
+    -------
+    UpDown
+        The UpDown object with ramp limits in per-unit per minute
+    """
+    from r2x.models import UpDown
+    
+    # Convert from per-unit per hour to per-unit per minute
+    # Conversion: (ramp_limit_pu_per_hour * rating_pu) / 60.0
+    ramp_up_pu_per_min = (ramp_up_pu_per_hour * rating_pu) / 60.0
+    ramp_down_pu_per_min = (ramp_down_pu_per_hour * rating_pu) / 60.0
+    
+    return UpDown(up=ramp_up_pu_per_min, down=ramp_down_pu_per_min)
+
+
 def create_fromto_tofrom_from_pypsa(from_value: float, to_value: float, base_value: float = 1.0) -> FromTo_ToFrom:
     """Create a FromTo_ToFrom object from PyPSA flow values.
 

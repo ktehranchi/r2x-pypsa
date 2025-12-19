@@ -39,6 +39,7 @@ from r2x_pypsa.serialization.utils import (
     convert_to_per_unit,
     create_voltage_from_pypsa,
     create_minmax_from_pypsa,
+    create_updown_from_pypsa,
     create_fromto_tofrom_from_pypsa,
     create_inputoutput_from_pypsa,
     get_pypsa_object_id,
@@ -251,6 +252,12 @@ def _(
     mapping: dict[str, Any] | None = None,
 ):
     """Convert a PypsaGenerator to the appropriate Sienna generator type."""
+    # Skip inactive generators
+    active = get_pypsa_property(pypsa_system, component, "active")
+    if active is False:
+        logger.debug(f"Skipping inactive generator {component.name} (active=False)")
+        return
+    
     # Provide default mapping if none given
     if mapping is None:
         # Import here to avoid circular import
@@ -367,29 +374,67 @@ def _(
             p_min_pu * p_nom, p_max_pu * p_nom, 100.0  # Use base_power (100.0) instead of p_nom
         )
 
-    # Set ramping limits (convert from PyPSA per-unit per hour to Sienna MW/min)
-    # PyPSA: ramp_limit_up/down are per-unit per hour (e.g., 1.0 = 100% of p_nom per hour)
-    # Sienna: ramp_limits are in MW/min
-    # Conversion: (ramp_limit * p_nom) / 60.0 minutes per hour
+    # Set ramping limits (convert from PyPSA per-unit per hour to Sienna per-unit per minute)
+    # PyPSA: ramp_limit_up/down are per-unit per hour relative to p_nom (e.g., 1.0 = 100% of p_nom per hour)
+    # Sienna: ramp_limits are in per-unit per minute relative to base_power (100 MVA)
+    # Conversion: (ramp_limit_pu_per_hour * p_nom_mw / base_power_mva) / 60.0 min_per_hour
+    #            = (ramp_limit_pu_per_hour * rating_pu) / 60.0 min_per_hour
     ramp_limit_up = get_pypsa_property(pypsa_system, component, "ramp_limit_up")
     ramp_limit_down = get_pypsa_property(pypsa_system, component, "ramp_limit_down")
-    
+
     # Check if ramping limits are valid (not None and not NaN)
     if (ramp_limit_up is not None and not pd.isna(ramp_limit_up) and 
         ramp_limit_down is not None and not pd.isna(ramp_limit_down)):
-        # Convert from per-unit per hour to MW/min
-        ramp_up_mw_per_min = (float(ramp_limit_up) * p_nom) / 60.0
-        ramp_down_mw_per_min = (float(ramp_limit_down) * p_nom) / 60.0
-        generator.ramp_limits = UpDown(up=ramp_up_mw_per_min, down=ramp_down_mw_per_min)
+        # Use p_nom / base_power directly for rating in per-unit (same as we set for generator.rating)
+        rating_pu = p_nom / 100.0
+        # Use helper function to create UpDown object, similar to create_minmax_from_pypsa
+        generator.ramp_limits = create_updown_from_pypsa(
+            float(ramp_limit_up), 
+            float(ramp_limit_down), 
+            rating_pu,
+            base_value=100.0  # base_power for consistency
+        )
+        # Calculate expected ramp down in MW/h for verification
+        expected_ramp_down_mw_per_h = ramp_limit_down * p_nom
+        actual_ramp_down_mw_per_h = generator.ramp_limits.down * 100.0 * 60.0
         logger.debug(
             f"Set ramping limits for {component.name}: "
-            f"up={ramp_up_mw_per_min:.2f} MW/min, down={ramp_down_mw_per_min:.2f} MW/min "
-            f"(from PyPSA: up={ramp_limit_up:.2f} pu/h, down={ramp_limit_down:.2f} pu/h)"
+            f"up={generator.ramp_limits.up:.6f} pu/min, down={generator.ramp_limits.down:.6f} pu/min "
+            f"(from PyPSA: up={ramp_limit_up:.6f} pu/h, down={ramp_limit_down:.6f} pu/h, "
+            f"rating={rating_pu:.6f} pu, p_nom={p_nom:.2f} MW). "
+            f"Expected ramp down: {expected_ramp_down_mw_per_h:.2f} MW/h, "
+            f"Actual: {actual_ramp_down_mw_per_h:.2f} MW/h"
         )
     else:
         # No ramping limits (NaN for renewables, or missing)
         generator.ramp_limits = None
-        logger.debug(f"Generator {component.name} has no ramping limits (ramp_limit_up={ramp_limit_up}, ramp_limit_down={ramp_limit_down})")
+        logger.debug(
+            f"Generator {component.name} has no ramping limits "
+            f"(ramp_limit_up={ramp_limit_up}, ramp_limit_down={ramp_limit_down})"
+        )
+
+    # Set initial active power
+    # Start thermal generators at full capacity (p_nom) to match PyPSA behavior
+    # where generators can start at full power without ramp constraints
+    # active_power must be in per-unit (relative to base_power) to match active_power_limits
+    if isinstance(generator, ThermalStandard):
+        # Start at full capacity - convert p_nom (MW) to per-unit
+        # active_power should be in per-unit to match active_power_limits validation
+        # rating = p_nom / base_power, so setting active_power = rating gives us full capacity
+        rating_value = generator.rating.magnitude if hasattr(generator.rating, 'magnitude') else float(generator.rating)
+        generator.active_power = rating_value  # Per-unit (full capacity = rating)
+        # Set status to True so generator is considered "on" at start
+        generator.status = True
+        logger.debug(
+            f"Set initial active_power={rating_value:.6f} pu (={rating_value * 100.0:.2f} MW) and status=True for {component.name}"
+        )
+    elif isinstance(generator, RenewableDispatch):
+        # For renewable generators, start at 0 (they ramp up based on availability)
+        # RenewableDispatch doesn't have a status attribute
+        generator.active_power = 0.0
+        logger.debug(
+            f"Set initial active_power=0.0 pu for renewable {component.name}"
+        )
 
     generator.services = []
     psy_system.add_component(generator)
@@ -613,6 +658,12 @@ def _(
     The Store will be converted instead and will use this StorageUnit's power-side data
     (p_nom, efficiencies, time series) while using the Store's energy-side data (e_nom, e_initial, etc.).
     """
+    # Skip inactive storage units
+    active = get_pypsa_property(pypsa_system, component, "active")
+    if active is False:
+        logger.debug(f"Skipping inactive storage unit {component.name} (active=False)")
+        return
+    
     # Check if a corresponding Store exists - if so, skip StorageUnit conversion
     # The Store will handle the conversion and use StorageUnit's power-side data
     try:
@@ -721,14 +772,18 @@ def _(
     # PowerSystems.jl's get_input_active_power_limits() and get_output_active_power_limits()
     # multiply by base_power when NATURAL_UNITS is set, so we must set them in per-unit here.
     
-    # Set storage_target for cyclic storage: if cyclic_state_of_charge_per_period is True,
-    # set storage_target = initial_storage_capacity_level to enforce initial = final SOC
-    storage_target = initial_storage_capacity_level if cyclic_state_of_charge_per_period else 0.0
-    if cyclic_state_of_charge_per_period and storage_target > 0:
+    # Set storage_target for cyclic storage to enforce initial = final SOC
+    # When energy_target=true in StorageDispatchWithReserves, this enforces final energy = storage_target
+    # By setting storage_target = initial_storage_capacity_level, we get initial = final (cyclic constraint)
+    if cyclic_state_of_charge_per_period:
+        storage_target = initial_storage_capacity_level
         logger.debug(
             f"Storage {component.name} has cyclic_state_of_charge_per_period=True, "
-            f"setting storage_target={storage_target:.4f} to enforce initial = final SOC"
+            f"setting storage_target={storage_target:.4f} to match initial_storage_capacity_level "
+            f"(will enforce initial = final SOC when energy_target=true)"
         )
+    else:
+        storage_target = 0.0  # Default: no target for non-cyclic storage
     
     battery = EnergyReservoirStorage(
         uuid=component.uuid,
@@ -744,8 +799,20 @@ def _(
         storage_technology_type=StorageTechs.LIB,
         prime_mover_type=PrimeMoversType.BA,
         storage_capacity=storage_capacity / base_power,  # per-unit (will be multiplied by base_power in NATURAL_UNITS)
-        storage_target=storage_target,  # Set to initial_storage_capacity_level for cyclic storage (enforces initial = final)
     )
+    
+    # NOTE: We do NOT set storage_target in ext dict here to avoid PowerSimulations bugs
+    # Even when energy_target=false, PowerSimulations may try to read storage_target from JSON
+    # and create StorageEnergySurplusVariable, causing dimension mismatch errors.
+    # Instead, storage_target will only be set during serialization if energy_target=true is used.
+    # For now, we skip setting it entirely to avoid the bug.
+    # TODO: Re-enable this when PowerSimulations fixes the StorageEnergySurplusVariable dimension bug
+    # if storage_target != 0.0 or cyclic_state_of_charge_per_period:
+    #     battery.ext["storage_target"] = storage_target
+    #     logger.debug(
+    #         f"Set storage_target={storage_target:.4f} in ext dict for {component.name} "
+    #         f"(will be serialized to JSON and used by Julia when energy_target=true)"
+    #     )
 
     # Set operational cost
     battery.operation_cost = create_operational_cost(battery, component, pypsa_system)
@@ -778,6 +845,12 @@ def _(
     mapping: dict[str, Any] | None = None,
 ):
     """Convert a PypsaStore to an EnergyReservoirStorage."""
+    # Skip inactive stores
+    active = get_pypsa_property(pypsa_system, component, "active")
+    if active is False:
+        logger.debug(f"Skipping inactive store {component.name} (active=False)")
+        return
+    
     # Get bus connection
     bus_name = component.bus  # bus is a string attribute, not a PypsaProperty
     if not bus_name:
@@ -896,14 +969,18 @@ def _(
         output=efficiency_dispatch
     )
     
-    # Set storage_target for cyclic storage: if e_cyclic or e_cyclic_per_period is True,
-    # set storage_target = initial_storage_capacity_level to enforce initial = final SOC
-    storage_target = initial_storage_capacity_level if (e_cyclic or e_cyclic_per_period) else 0.0
-    if (e_cyclic or e_cyclic_per_period) and storage_target > 0:
+    # Set storage_target for cyclic storage to enforce initial = final SOC
+    # When energy_target=true in StorageDispatchWithReserves, this enforces final energy = storage_target
+    # By setting storage_target = initial_storage_capacity_level, we get initial = final (cyclic constraint)
+    if e_cyclic or e_cyclic_per_period:
+        storage_target = initial_storage_capacity_level
         logger.debug(
             f"Store {component.name} has e_cyclic={e_cyclic} or e_cyclic_per_period={e_cyclic_per_period}, "
-            f"setting storage_target={storage_target:.4f} to enforce initial = final SOC"
+            f"setting storage_target={storage_target:.4f} to match initial_storage_capacity_level "
+            f"(will enforce initial = final SOC when energy_target=true)"
         )
+    else:
+        storage_target = 0.0  # Default: no target for non-cyclic storage
     
     store = EnergyReservoirStorage(
         uuid=component.uuid,
@@ -919,8 +996,20 @@ def _(
         storage_technology_type=StorageTechs.LIB,
         prime_mover_type=PrimeMoversType.BA,
         storage_capacity=e_nom / base_power,  # per-unit (will be multiplied by base_power in NATURAL_UNITS)
-        storage_target=storage_target,  # Set to initial_storage_capacity_level for cyclic storage (enforces initial = final)
     )
+    
+    # NOTE: We do NOT set storage_target in ext dict here to avoid PowerSimulations bugs
+    # Even when energy_target=false, PowerSimulations may try to read storage_target from JSON
+    # and create StorageEnergySurplusVariable, causing dimension mismatch errors.
+    # Instead, storage_target will only be set during serialization if energy_target=true is used.
+    # For now, we skip setting it entirely to avoid the bug.
+    # TODO: Re-enable this when PowerSimulations fixes the StorageEnergySurplusVariable dimension bug
+    # if storage_target != 0.0 or e_cyclic or e_cyclic_per_period:
+    #     store.ext["storage_target"] = storage_target
+    #     logger.debug(
+    #         f"Set storage_target={storage_target:.4f} in ext dict for {component.name} "
+    #         f"(will be serialized to JSON and used by Julia when energy_target=true)"
+    #     )
     store.services = []
     psy_system.add_component(store)
 
