@@ -235,11 +235,25 @@ def _(
         bustype = ACBusTypes.REF
         logger.info(f"Setting first bus {component.name} as REF (slack) bus")
 
+    # Create or get Area for this bus (REQUIRED for AreaBalancePowerModel)
+    # Area name follows pattern: {bus_name}_area (e.g., p60 -> p60_area)
+    area_name = f"{component.name}_area"
+    
+    # Check if area already exists, create if not
+    if not psy_system.list_components_by_name(Area, area_name):
+        area = Area(name=area_name)
+        psy_system.add_component(area)
+        logger.debug(f"Created area {area_name} for bus {component.name}")
+    else:
+        area = psy_system.get_component(Area, area_name)
+        logger.trace(f"Using existing area {area_name} for bus {component.name}")
+
     bus = ACBus(
         name=component.name,
         number=object_id,
         base_voltage=base_voltage,
         bustype=bustype,
+        area=area,  # Assign area to bus (REQUIRED for AreaBalancePowerModel)
     )
     psy_system.add_component(bus)
 
@@ -525,12 +539,12 @@ def _(
     )
     interchange.services = []
 
-    # Add time series if they exist - extract from PypsaProperty
-    if hasattr(component, "s_max_pu") and component.s_max_pu.has_time_series():
-        ts_data = component.s_max_pu.get_time_series()
-        ts = create_single_time_series_from_pandas(ts_data, "max_active_power")
-        psy_system.add_time_series(ts, interchange)
-        logger.debug(f"Added time series for line {component.name}")
+    # NOTE: We do NOT add time series to AreaInterchange components
+    # PowerSimulations requires ALL AreaInterchange components to have time series if ANY do,
+    # and the time series must be named "from_to_flow_limit" and "to_from_flow_limit"
+    # Since PyPSA lines typically have static capacities, we use static flow limits instead
+    # This avoids the error: "No devices with time series from_to_flow_limit found"
+    # Static flow limits are handled automatically by PowerSimulations when no time series exist
 
     psy_system.add_component(interchange)
 
@@ -1134,19 +1148,9 @@ def _(
     reverse_interchange.services = []
     psy_system.add_component(reverse_interchange)
 
-    # Add time series if they exist - extract from PypsaProperty
-    for property_name in ["p_set", "marginal_cost"]:
-        if hasattr(component, property_name):
-            prop = getattr(component, property_name)
-            if hasattr(prop, "has_time_series") and prop.has_time_series():
-                ts_data = prop.get_time_series()
-                if property_name == "p_set":
-                    ts = create_single_time_series_from_pandas(ts_data, "active_power")
-                elif property_name == "marginal_cost":
-                    ts = create_single_time_series_from_pandas(ts_data, "operation_cost")
-                else:
-                    continue
-                # Add time series to both forward and reverse interchanges
-                psy_system.add_time_series(ts, forward_interchange)
-                psy_system.add_time_series(ts, reverse_interchange)
-                logger.debug(f"Added {property_name} time series for link {component.name}")
+    # NOTE: We do NOT add time series to AreaInterchange components from Links
+    # PowerSimulations requires ALL AreaInterchange components to have time series if ANY do,
+    # and the time series must be named "from_to_flow_limit" and "to_from_flow_limit"
+    # Since PyPSA links typically have static capacities, we use static flow limits instead
+    # This avoids the error: "No devices with time series from_to_flow_limit found"
+    # Static flow limits are handled automatically by PowerSimulations when no time series exist

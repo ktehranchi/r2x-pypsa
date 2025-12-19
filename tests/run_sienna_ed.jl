@@ -4,7 +4,7 @@
 # Usage:
 #   julia run_sienna_ed.jl <json_file> <output_file>
 # 
-# Automatically uses cache if available and newer than JSON file for faster iteration.
+# Always loads system from JSON and creates template fresh (no caching).
 
 # Activate local environment for reproducible package versions
 # Note: Can also use `julia --project=tests` flag to activate before script runs
@@ -14,7 +14,7 @@ Pkg.activate(@__DIR__)
 using PowerSystems
 using PowerSystems: get_time_series_array, DeterministicSingleTimeSeries, PrimeMovers
 using PowerSimulations
-using PowerSimulations: ActivePowerTimeSeriesParameter, ActivePowerVariable, ActivePowerOutVariable, ActivePowerInVariable, RampConstraint, get_optimization_container, get_constraint, RateofChangeConstraintSlackDown, RateofChangeConstraintSlackUp, get_variable
+using PowerSimulations: ActivePowerTimeSeriesParameter, ActivePowerVariable, ActivePowerOutVariable, ActivePowerInVariable, RampConstraint, get_optimization_container, get_constraint, RateofChangeConstraintSlackDown, RateofChangeConstraintSlackUp, get_variable, FlowActivePowerVariable, FlowLimitConstraint, ConstraintKey, ExpressionKey, ActivePowerBalance, VariableKey, has_container_key, get_expression, get_branch_models, get_network_model, get_component_type, get_time_steps
 using JuMP
 using MathOptInterface
 const MOI = MathOptInterface
@@ -68,44 +68,25 @@ else
     println("  Output: $output_file")
 end
 
-# Check if we can use cached system (faster)
-system_cache_file = replace(json_file, ".json" => "_system_cache.jls")
-use_cache = false
+# Load system from JSON (always fresh, no caching)
+println("Loading system from JSON (this may take a while)...")
+sys = System(json_file)
+set_units_base_system!(sys, "NATURAL_UNITS")
 
-if isfile(system_cache_file) && isfile(json_file)
-    cache_mtime = mtime(system_cache_file)
-    json_mtime = mtime(json_file)
-    if cache_mtime > json_mtime
-        use_cache = true
-        println("Using cached system (cache is newer than JSON file)")
-        println("  Cache: $system_cache_file (modified: $(Dates.unix2datetime(cache_mtime)))")
-        println("  JSON: $json_file (modified: $(Dates.unix2datetime(json_mtime)))")
-    else
-        println("Cache is older than JSON file, will reload system")
-    end
+# Transform time series to DeterministicSingleTimeSeries (required for PowerSimulations v5)
+# This converts SingleTimeSeries to DeterministicSingleTimeSeries with forecast horizon
+# Use 1 week (168 hours) to match PyPSA optimization period
+println("Transforming time series...")
+try
+    transform_single_time_series!(sys, Hour(7*24), Hour(24))
+    println("Transformed time series to DeterministicSingleTimeSeries (1 week horizon)")
+catch e
+    println("WARNING: Could not transform time series: $e")
 end
 
-# Load system (use cache if available and newer than JSON)
-# NOTE: We can't cache the System object because it contains SQLite connections that don't serialize well
-# So we always load from JSON, but we can cache the template
-if use_cache
-    println("Loading system from JSON and cached template...")
-    sys = System(json_file)
-    set_units_base_system!(sys, "NATURAL_UNITS")
-    
-    # Transform time series (required even when using cached template)
-    # Use 1 week (168 hours) to match PyPSA optimization period
-    println("Transforming time series...")
-    try
-        transform_single_time_series!(sys, Hour(7*24), Hour(24))
-        println("Transformed time series to DeterministicSingleTimeSeries (1 week horizon)")
-    catch e
-        println("WARNING: Could not transform time series: $e")
-    end
-    
-    # Verify time series alignment (same verification as below)
-    println("\nVerifying time series alignment...")
-    try
+# Verify time series alignment
+println("\nVerifying time series alignment...")
+try
         using PowerSystems: get_time_series_keys, get_time_series_array, get_time_series, DeterministicSingleTimeSeries, get_resolution
         
         # Collect all time series from all components
@@ -225,232 +206,107 @@ if use_cache
             showerror(stdout, exc, bt)
             println()
         end
-    end
-    
-    # Load cached template
-    cached_data = Serialization.deserialize(system_cache_file)
-    if cached_data isa Tuple && length(cached_data) == 2
-        # Old format: (sys, template) - ignore sys, use template
-        _, template = cached_data
-    else
-        # New format: just template
-        template = cached_data
-    end
-    println("✓ Loaded system from JSON and template from cache")
-else
-    println("Loading system from JSON (this may take a while)...")
-    sys = System(json_file)
-    set_units_base_system!(sys, "NATURAL_UNITS")
-    
-    # Transform time series to DeterministicSingleTimeSeries (required for PowerSimulations v5)
-    # This converts SingleTimeSeries to DeterministicSingleTimeSeries with forecast horizon
-    # Use 1 week (168 hours) to match PyPSA optimization period
-    println("Transforming time series...")
-    try
-        transform_single_time_series!(sys, Hour(7*24), Hour(24))
-        println("Transformed time series to DeterministicSingleTimeSeries (1 week horizon)")
-    catch e
-        println("WARNING: Could not transform time series: $e")
-    end
+end
 
-    # Verify time series alignment
-    println("\nVerifying time series alignment...")
-    try
-        using PowerSystems: get_time_series_keys, get_time_series_array, get_time_series, DeterministicSingleTimeSeries, get_resolution
-        
-        # Collect all time series from all components
-        all_ts_info = []
-        component_types = [PowerLoad, ThermalStandard, RenewableDispatch, EnergyReservoirStorage]
-        
-        for comp_type in component_types
-            components = collect(get_components(comp_type, sys))
-            for comp in components
-                ts_keys = get_time_series_keys(comp)
-                for key in ts_keys
-                    try
-                        # Get the time series object (not the array)
-                        ts_obj = get_time_series(DeterministicSingleTimeSeries, comp, key.name)
-                        if ts_obj !== nothing
-                            # Get the array for length and data checks
-                            ts_data = get_time_series_array(DeterministicSingleTimeSeries, comp, key.name)
-                            if ts_data !== nothing && !isempty(ts_data)
-                                # Get resolution from the time series object
-                                ts_resolution = get_resolution(ts_obj)
-                                # Get timestamps from the array (TimeArray has timestamps)
-                                ts_timestamps = TimeSeries.timestamp(ts_data)
-                                push!(all_ts_info, (
-                                    component_type = string(comp_type),
-                                    component_name = get_name(comp),
-                                    ts_name = key.name,
-                                    length = length(ts_data),
-                                    resolution = ts_resolution,
-                                    initial_time = first(ts_timestamps),
-                                    final_time = last(ts_timestamps),
-                                    has_nan = any(isnan.(TimeSeries.values(ts_data))),
-                                    has_inf = any(isinf.(TimeSeries.values(ts_data))),
-                                ))
-                            end
-                        end
-                    catch e
-                        # Silently skip time series that can't be retrieved (e.g., invalid time series names for certain component types)
-                        # Only print warnings for unexpected errors
-                        if !occursin("not implemented", string(e)) && !occursin("not found", string(e))
-                            println("  WARNING: Could not get time series $(key.name) for $(get_name(comp)): $e")
-                        end
-                    end
-                end
-            end
-        end
-        
-        if isempty(all_ts_info)
-            println("  WARNING: No time series found in system!")
-        else
-            # Check alignment
-            lengths = [ts.length for ts in all_ts_info]
-            resolutions = [ts.resolution for ts in all_ts_info]
-            initial_times = [ts.initial_time for ts in all_ts_info]
-            
-            unique_lengths = unique(lengths)
-            unique_resolutions = unique(resolutions)
-            unique_initial_times = unique(initial_times)
-            
-            println("  Time series summary:")
-            println("    Total time series: $(length(all_ts_info))")
-            println("    Unique lengths: $(unique_lengths)")
-            println("    Unique resolutions: $(unique_resolutions)")
-            println("    Unique initial times: $(length(unique_initial_times))")
-            
-            # Check for alignment issues
-            issues = []
-            if length(unique_lengths) > 1
-                push!(issues, "MISMATCH: Time series have different lengths: $(unique_lengths)")
-            end
-            if length(unique_resolutions) > 1
-                push!(issues, "MISMATCH: Time series have different resolutions: $(unique_resolutions)")
-            end
-            if length(unique_initial_times) > 1
-                push!(issues, "MISMATCH: Time series have different initial times: $(unique_initial_times[1:min(3, length(unique_initial_times))])...")
-            end
-            
-            # Check for NaN/Inf values
-            nan_ts = [ts for ts in all_ts_info if ts.has_nan]
-            inf_ts = [ts for ts in all_ts_info if ts.has_inf]
-            
-            if !isempty(nan_ts)
-                push!(issues, "INVALID: $(length(nan_ts)) time series contain NaN values")
-                for ts in nan_ts[1:min(3, length(nan_ts))]
-                    println("    - $(ts.component_type).$(ts.component_name).$(ts.ts_name)")
-                end
-            end
-            if !isempty(inf_ts)
-                push!(issues, "INVALID: $(length(inf_ts)) time series contain Inf values")
-                for ts in inf_ts[1:min(3, length(inf_ts))]
-                    println("    - $(ts.component_type).$(ts.component_name).$(ts.ts_name)")
-                end
-            end
-            
-            if isempty(issues)
-                println("  ✓ All time series are aligned and valid")
-            else
-                println("  ✗ Time series alignment issues found:")
-                for issue in issues
-                    println("    $issue")
-                end
-            end
-            
-            # Show sample of time series by component type
-            println("\n  Sample time series by component type:")
-            for comp_type in unique([ts.component_type for ts in all_ts_info])
-                type_ts = [ts for ts in all_ts_info if ts.component_type == comp_type]
-                if !isempty(type_ts)
-                    sample = type_ts[1]
-                    println("    $(comp_type): $(length(type_ts)) time series, length=$(sample.length), resolution=$(sample.resolution)")
-                end
-            end
-        end
-    catch e
-        println("  ERROR: Could not verify time series alignment: $e")
-        println("  Stacktrace:")
-        for (exc, bt) in Base.catch_stack()
-            showerror(stdout, exc, bt)
-            println()
-        end
-    end
+# Create problem template
+println("Creating problem template...")
+template = ProblemTemplate()
+# Explicitly disable ramp slack variables to enforce strict ramp constraints
+thermal_model = DeviceModel(ThermalStandard, ThermalStandardDispatch; use_slacks = false)
+set_device_model!(template, thermal_model)
+set_device_model!(template, RenewableDispatch, RenewableFullDispatch)
 
-    # Create problem template
-    println("Creating problem template...")
-    template = ProblemTemplate()
-    # Explicitly disable ramp slack variables to enforce strict ramp constraints
-    thermal_model = DeviceModel(ThermalStandard, ThermalStandardDispatch; use_slacks = false)
-    set_device_model!(template, thermal_model)
-    set_device_model!(template, RenewableDispatch, RenewableFullDispatch)
-    
-    # Configure StaticPowerLoad - use default "max_active_power" time series name
-    # Note: There was a PowerSystems v5 bug where get_max_active_power() returns MW instead of per-unit
-    # when a time series named "max_active_power" exists, but this may have been fixed or the workaround
-    # using "active_power" may be causing scaling issues. Reverting to default to test.
-    set_device_model!(template, PowerLoad, StaticPowerLoad)
+# Configure StaticPowerLoad - use default "max_active_power" time series name
+# Note: There was a PowerSystems v5 bug where get_max_active_power() returns MW instead of per-unit
+# when a time series named "max_active_power" exists, but this may have been fixed or the workaround
+# using "active_power" may be causing scaling issues. Reverting to default to test.
+set_device_model!(template, PowerLoad, StaticPowerLoad)
 
-    # Check for storage units (will be dispatched if present in system)
-    if !isempty(collect(get_components(EnergyReservoirStorage, sys)))
-        if has_storage_pkg
+# Check for storage units (will be dispatched if present in system)
+if !isempty(collect(get_components(EnergyReservoirStorage, sys)))
+    if has_storage_pkg
+        try
+            # Use StorageDispatchWithReserves from StorageSystemsSimulations.jl
+            storage_model = DeviceModel(
+                EnergyReservoirStorage,
+                StorageSystemsSimulations.StorageDispatchWithReserves;
+                attributes = Dict{String, Any}(
+                    "reservation" => false,
+                    "cycling_limits" => false,
+                    "energy_target" => false,  # Enable energy target to enforce initial = final SOC (cyclic constraint)
+                    "complete_coverage" => false,
+                    "regularization" => false,
+                ),
+            )
+            set_device_model!(template, storage_model)
+            println("✓ Set EnergyReservoirStorage model: StorageDispatchWithReserves (dispatchable)")
+        catch e
+            println("WARNING: Could not set EnergyReservoirStorage model with StorageDispatchWithReserves")
+            println("  Error: $e")
+            # Fallback to FixedOutput
             try
-                # Use StorageDispatchWithReserves from StorageSystemsSimulations.jl
-                storage_model = DeviceModel(
-                    EnergyReservoirStorage,
-                    StorageSystemsSimulations.StorageDispatchWithReserves;
-                    attributes = Dict{String, Any}(
-                        "reservation" => false,
-                        "cycling_limits" => false,
-                        "energy_target" => false,  # Enable energy target to enforce initial = final SOC (cyclic constraint)
-                        "complete_coverage" => false,
-                        "regularization" => false,
-                    ),
-                )
+                storage_model = DeviceModel(EnergyReservoirStorage, FixedOutput)
                 set_device_model!(template, storage_model)
-                println("✓ Set EnergyReservoirStorage model: StorageDispatchWithReserves (dispatchable)")
-            catch e
-                println("WARNING: Could not set EnergyReservoirStorage model with StorageDispatchWithReserves")
-                println("  Error: $e")
-                # Fallback to FixedOutput
-                try
-                    storage_model = DeviceModel(EnergyReservoirStorage, FixedOutput)
-                    set_device_model!(template, storage_model)
-                    println("  Fallback: Using FixedOutput for EnergyReservoirStorage (not dispatchable)")
-                catch e2
-                    println("  Fallback also failed: $e2")
-                end
+                println("  Fallback: Using FixedOutput for EnergyReservoirStorage (not dispatchable)")
+            catch e2
+                println("  Fallback also failed: $e2")
             end
-        else
-            println("WARNING: EnergyReservoirStorage components found but StorageSystemsSimulations.jl not available")
-            println("  Storage will not be dispatched. Add StorageSystemsSimulations.jl to Project.toml")
         end
+    else
+        println("WARNING: EnergyReservoirStorage components found but StorageSystemsSimulations.jl not available")
+        println("  Storage will not be dispatched. Add StorageSystemsSimulations.jl to Project.toml")
     end
-
-    # Set network model (no slack variables for pure economic dispatch)
-    # IMPORTANT: For CopperPlatePowerModel to work correctly without Line components,
-    # we must manually specify a single subnetwork containing all buses.
-    # Otherwise, find_subnetworks() will create one subnetwork per bus (since there are no Line components),
-    # which results in per-bus balance constraints instead of system-wide balance.
-    all_buses = collect(get_components(ACBus, sys))
-    all_bus_numbers = Set(get_number(b) for b in all_buses)
-    single_subnetwork = Dict(1 => all_bus_numbers)
-    set_network_model!(template, NetworkModel(CopperPlatePowerModel; subnetworks = single_subnetwork))
-    println("✓ Set network model: CopperPlatePowerModel with single subnetwork containing all $(length(all_buses)) buses")
-    
-    # Save template to cache for next time (don't cache system - it has SQLite connections)
-    println("Saving template to cache: $system_cache_file")
-    Serialization.serialize(system_cache_file, template)
-    println("✓ Cached template for faster future runs")
 end
 
-# Debug: Print system components (always run, regardless of cache)
+# Set network model (no slack variables for pure economic dispatch)
+# AreaBalancePowerModel enforces area-based balance with transmission constraints
+# using AreaInterchange components. It represents each area as a single node and
+# enforces flow limits between areas via AreaInterchange components.
+# This is simpler than AreaPTDFPowerModel (no PTDF matrices needed).
+set_network_model!(template, NetworkModel(AreaBalancePowerModel))
+println("✓ Set network model: AreaBalancePowerModel (enforces area balance with AreaInterchange flow limits)")
+
+# Configure AreaInterchange device model (required for AreaBalancePowerModel to work)
+# StaticBranch formulation enforces flow limits from AreaInterchange components
+if !isempty(collect(get_components(AreaInterchange, sys)))
+    area_interchange_model = DeviceModel(AreaInterchange, StaticBranch)
+    set_device_model!(template, area_interchange_model)
+    println("✓ Set AreaInterchange model: StaticBranch (enforces flow limits)")
+else
+    println("⚠ No AreaInterchange components found - transmission constraints will not be enforced")
+end
+
+# Debug: Print system components
 println("\nSystem components:")
 println("  Buses: $(length(collect(get_components(ACBus, sys))))")
 println("  PowerLoads: $(length(collect(get_components(PowerLoad, sys))))")
 println("  ThermalStandard: $(length(collect(get_components(ThermalStandard, sys))))")
 println("  RenewableDispatch: $(length(collect(get_components(RenewableDispatch, sys)))) (includes hydro)")
 println("  EnergyReservoirStorage: $(length(collect(get_components(EnergyReservoirStorage, sys))))")
+
+# Check if all buses have Areas (REQUIRED for AreaBalancePowerModel)
+println("\nChecking Area assignments (REQUIRED for AreaBalancePowerModel):")
+buses = collect(get_components(ACBus, sys))
+areas = collect(get_components(Area, sys))
+println("  Total Areas in system: $(length(areas))")
+if !isempty(areas)
+    println("  Area names: $(collect(get_name(a) for a in areas))")
+end
+
+buses_without_areas = [b for b in buses if PSY.get_area(b) === nothing]
+if !isempty(buses_without_areas)
+    println("  ✗ ERROR: $(length(buses_without_areas)) buses do NOT have Areas assigned:")
+    for b in buses_without_areas[1:min(5, length(buses_without_areas))]
+        println("    - $(get_name(b)) (bus number: $(get_number(b)))")
+    end
+    if length(buses_without_areas) > 5
+        println("    ... and $(length(buses_without_areas) - 5) more")
+    end
+    println("  AreaBalancePowerModel REQUIRES all buses to have Areas assigned!")
+    println("  This is likely the cause of the build failure.")
+else
+    println("  ✓ All buses have Areas assigned")
+end
 
 # Debug: Check load values
 loads = collect(get_components(PowerLoad, sys))
@@ -645,6 +501,8 @@ println("\n" * "="^80)
 println("VERIFYING TRANSMISSION COMPONENTS")
 println("="^80)
 
+# Store interchange_count in global scope for diagnostics
+global interchange_count = 0
 try
     # Check for Line components (actual transmission branches connecting buses)
     local lines = collect(get_components(Line, sys))
@@ -652,7 +510,7 @@ try
     
     # Check for AreaInterchange components (area-to-area flow limits)
     local area_interchanges = collect(get_components(AreaInterchange, sys))
-    local interchange_count = length(area_interchanges)
+    global interchange_count = length(area_interchanges)
     
     # Check for other branch types
     local transformers = collect(get_components(Transformer2W, sys))
@@ -664,16 +522,11 @@ try
     println("  Transformer2W components: $transformer_count")
     
     if line_count == 0 && interchange_count > 0
-        println("\n⚠️  WARNING: No Line components found!")
+        println("\n✓ Area-based transmission model detected:")
         println("  - System has $interchange_count AreaInterchange components")
-        println("  - AreaInterchange does NOT enable bus-to-bus power flow")
-        println("  - AreaInterchange requires actual Line/ACBranch components between areas to work")
-        println("  - Without Line components, each bus must balance generation and load locally")
-        println("  - This will cause wind curtailment at low-load buses")
-        println("\n  KEY INSIGHT:")
-        println("  - AreaInterchange is IGNORED in CopperPlatePowerModel")
-        println("  - AreaInterchange only constrains flow IF Line components exist between areas")
-        println("  - Without Line components, AreaInterchange constraints are skipped")
+        println("  - AreaBalancePowerModel uses AreaInterchange to enforce area-to-area flow limits")
+        println("  - No Line components needed - each area is treated as a single aggregated node")
+        println("  - Power balance is enforced per area, with transmission constraints via AreaInterchange")
     elseif line_count > 0
         println("\n✓ Line components found: $line_count")
         println("  - These enable bus-to-bus power flow")
@@ -682,20 +535,20 @@ try
     # Check what device models are configured for branches
     println("\nBranch Device Models in Template:")
     try
-        if haskey(template.devices, :Line)
-            println("  ✓ Line: $(template.devices[:Line])")
+        if haskey(template.branches, :Line)
+            println("  ✓ Line: $(template.branches[:Line])")
         else
             println("  ✗ Line: NOT CONFIGURED")
         end
         
-        if haskey(template.devices, :AreaInterchange)
-            println("  ✓ AreaInterchange: $(template.devices[:AreaInterchange])")
+        if haskey(template.branches, :AreaInterchange)
+            println("  ✓ AreaInterchange: $(template.branches[:AreaInterchange])")
         else
             println("  ✗ AreaInterchange: NOT CONFIGURED")
         end
         
-        if haskey(template.devices, :Transformer2W)
-            println("  ✓ Transformer2W: $(template.devices[:Transformer2W])")
+        if haskey(template.branches, :Transformer2W)
+            println("  ✓ Transformer2W: $(template.branches[:Transformer2W])")
         else
             println("  ✗ Transformer2W: NOT CONFIGURED")
         end
@@ -706,11 +559,9 @@ try
     # Check network model type
     println("\nNetwork Model:")
     try
-        if haskey(template.network, :network_model)
-            println("  Network model: $(template.network[:network_model])")
-        else
-            println("  Network model: (using default - likely CopperPlateBalance)")
-        end
+        network_model = template.network_model
+        network_formulation = get_network_formulation(network_model)
+        println("  Network model: $network_formulation")
     catch e
         println("  Could not determine network model: $e")
     end
@@ -718,13 +569,13 @@ try
     # Check subnetworks (this is the KEY issue!)
     println("\nSubnetworks (CRITICAL FOR COPPERPLATE):")
     try
-        # After model is built, we can check subnetworks
-        # But we can't access it until after build!, so we'll check after optimization
-        println("  NOTE: Subnetworks are determined by find_subnetworks(sys)")
-        println("  - find_subnetworks uses Line components to find connected buses")
-        println("  - Without Line components, each bus becomes its own isolated subnetwork")
-        println("  - Even with CopperPlatePowerModel, balance is enforced PER SUBNETWORK")
-        println("  - So without Line components, you get per-bus balance, not system-wide!")
+        # For AreaBalancePowerModel, subnetworks are determined from Area topology
+        # Areas are connected via AreaInterchange components
+        # This is handled automatically when the model is built
+        println("  NOTE: For AreaBalancePowerModel, subnetworks are determined from Area topology")
+        println("  - Areas are connected via AreaInterchange components")
+        println("  - Subnetworks are automatically determined when the model is built")
+        println("  - Balance is enforced PER AREA with transmission constraints via AreaInterchange flow limits")
         println("\n  This will be verified after model is built (see below)")
     catch e
         println("  Could not explain subnetworks: $e")
@@ -1303,12 +1154,82 @@ catch e
 end
 
 # build! requires output_dir in PowerSimulations v5
-println("Building model...")
+println("\nBuilding model...")
 output_dir = mktempdir()
 build!(model; output_dir=output_dir)
+println("  ✓ Model built successfully")
 
-# Check what's actually in the built model
-println("\nModel built. Checking dispatched components:")
+# ============================================================================
+# VERIFY AREABALANCEPOWERMODEL IS WORKING
+# ============================================================================
+println("\n" * "="^80)
+println("VERIFYING AREABALANCEPOWERMODEL CONFIGURATION")
+println("="^80)
+
+try
+    container = get_optimization_container(model)
+    time_steps = get_time_steps(container)
+    num_time_steps = length(time_steps)
+    
+    # Quick verification summary
+    println("\nAreaBalancePowerModel Status:")
+    
+    # 1. Check variables
+    has_vars = has_container_key(container, FlowActivePowerVariable, AreaInterchange)
+    if has_vars
+        flow_vars = get_variable(container, FlowActivePowerVariable(), AreaInterchange)
+        var_count = length(flow_vars)
+        expected_vars = interchange_count * num_time_steps
+        println("  ✓ FlowActivePowerVariable: $var_count variables ($interchange_count interchanges × $num_time_steps time steps)")
+        if var_count != expected_vars
+            println("    ⚠️  Expected $expected_vars variables")
+        end
+    else
+        println("  ✗ FlowActivePowerVariable: NOT FOUND")
+    end
+    
+    # 2. Check constraints
+    has_ub = has_container_key(container, FlowLimitConstraint, AreaInterchange, "ub")
+    has_lb = has_container_key(container, FlowLimitConstraint, AreaInterchange, "lb")
+    if has_ub && has_lb
+        ub_constraints = get_constraint(container, FlowLimitConstraint(), AreaInterchange, "ub")
+        lb_constraints = get_constraint(container, FlowLimitConstraint(), AreaInterchange, "lb")
+        ub_count = length(ub_constraints)
+        lb_count = length(lb_constraints)
+        expected_constraints = interchange_count * num_time_steps
+        println("  ✓ FlowLimitConstraint: $ub_count upper + $lb_count lower bounds")
+        if ub_count != expected_constraints || lb_count != expected_constraints
+            println("    ⚠️  Expected $expected_constraints each")
+        end
+    else
+        println("  ✗ FlowLimitConstraint: NOT FOUND")
+    end
+    
+    # 3. Check power balance
+    has_balance = has_container_key(container, ActivePowerBalance, Area)
+    if has_balance
+        area_expr = get_expression(container, ActivePowerBalance(), Area)
+        println("  ✓ ActivePowerBalance: Area-based balance expressions created")
+    else
+        println("  ✗ ActivePowerBalance: NOT FOUND")
+    end
+    
+    # Summary
+    println("\nSummary:")
+    if has_vars && has_ub && has_lb && has_balance
+        println("  ✓ AreaBalancePowerModel is correctly configured!")
+        println("  ✓ Transmission constraints are being enforced via AreaInterchange flow limits")
+        println("  ✓ Power balance is enforced per area with inter-area flow constraints")
+    else
+        println("  ✗ AreaBalancePowerModel configuration incomplete")
+        println("    Check the errors above")
+    end
+    
+catch e
+    println("  ✗ Error verifying AreaBalancePowerModel: $e")
+end
+
+println("="^80)
 
 # DEBUG: Check ramp constraints for nuclear generators
 println("\n" * "="^80)
@@ -1499,7 +1420,7 @@ try
             println("\n    ⚠️  WARNING: Multiple subnetworks detected!")
             println("    - Each subnetwork enforces its own balance constraint")
             println("    - This means buses are isolated - power cannot flow between subnetworks")
-            println("    - Even with CopperPlatePowerModel, you get per-subnetwork (per-bus) balance")
+            println("    - With AreaBalancePowerModel, balance is enforced per area with AreaInterchange flow limits")
             println("    - This explains why wind is curtailed - it can only serve local load!")
             
             # Show sample subnetworks
@@ -1820,6 +1741,25 @@ if objective !== nothing
             end
         catch e
             println("  Could not read load data: $e")
+        end
+        
+        # AreaInterchange flows (inter-area transmission)
+        try
+            interchange_df = read_variable(results, FlowActivePowerVariable, AreaInterchange, table_format=TableFormat.LONG)
+            if !isempty(interchange_df)
+                for row in eachrow(interchange_df)
+                    ai = get_component(AreaInterchange, sys, row.name)
+                    from_area = get_name(get_from_area(ai))
+                    to_area = get_name(get_to_area(ai))
+                    # Create a descriptive name showing the flow direction
+                    flow_name = "$(from_area) -> $(to_area)"
+                    carrier = "interchange"
+                    push!(dispatch_data, (DateTime=row.DateTime, name=flow_name, carrier=carrier, value=row.value))
+                end
+                println("  ✓ Exported $(nrow(interchange_df)) AreaInterchange flow records")
+            end
+        catch e
+            println("  Could not read AreaInterchange flow: $e")
         end
         
         if !isempty(dispatch_data)
