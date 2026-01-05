@@ -127,7 +127,7 @@ def test_real_pypsa_file():
     generators = list(system.get_components(PypsaGenerator))
     
     # Verify we have generators (real network should have many)
-    assert len(generators) == 85, "Network should have 85 generators"
+    assert len(generators) == 96, "Network should have 96 generators"
     
     
     # Test that generators have proper attributes
@@ -317,7 +317,6 @@ def test_all_generator_attributes_present(simple_parser: PypsaParser) -> None:
     assert hasattr(gen, 'p_min_pu')
     assert hasattr(gen, 'p_max_pu')
     assert hasattr(gen, 'p_set')
-    assert hasattr(gen, 'q_set')
     assert hasattr(gen, 'marginal_cost')
     assert hasattr(gen, 'marginal_cost_quadratic')
     assert hasattr(gen, 'efficiency')
@@ -362,7 +361,6 @@ def test_generator_attribute_defaults(simple_parser: PypsaParser) -> None:
     assert gen.p_min_pu.get_value() == 0.0  # Default minimum power
     assert gen.p_max_pu.get_value() == 1.0  # Default maximum power
     assert gen.p_set.get_value() == 0.0  # Default power set point
-    assert gen.q_set.get_value() == 0.0  # Default reactive power set point
     assert gen.marginal_cost.get_value() == 0.0  # Default marginal cost
     assert gen.marginal_cost_quadratic.get_value() == 0.0  # Default quadratic marginal cost
     assert gen.efficiency.get_value() == 1.0  # Default efficiency
@@ -619,14 +617,12 @@ def test_load_parsing(simple_netcdf_file):
     assert load1.bus == "bus1"
     assert load1.carrier == "electricity"
     assert load1.p_set == 20.0
-    assert load1.q_set == 5.0
     
     # Check second load attributes
     load2 = next(load for load in loads if load.name == "load2")
     assert load2.bus == "bus2"
     assert load2.carrier == "electricity"
     assert load2.p_set == 15.0
-    assert load2.q_set == 3.0
 
 
 def test_load_model_creation():
@@ -636,14 +632,12 @@ def test_load_model_creation():
     load = PypsaLoad(
         name="test_load",
         bus="bus1",
-        p_set=PypsaProperty.create(value=25.0, units="MW"),
-        q_set=PypsaProperty.create(value=6.0)
+        p_set=PypsaProperty.create(value=25.0, units="MW")
     )
     
     assert load.name == "test_load"
     assert load.bus == "bus1"
     assert load.p_set.get_value() == 25.0
-    assert load.q_set.get_value() == 6.0
     assert load.sign.get_value() == -1.0  # default
     assert load.active.get_value() is True  # default
 

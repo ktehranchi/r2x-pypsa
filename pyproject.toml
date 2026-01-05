@@ -10,14 +10,21 @@ dependencies = [
     "loguru",
     "ipython>=9.6.0",
     "pytest>=8.4.2",
+    "gurobipy>=12.0.3",
 ]
 requires-python = ">=3.11"
 
 [tool.uv.sources]
 r2x = { git = "https://github.com/NREL/r2x", branch = "v2.0.0" }
-r2x-pypsa = { path = ".", editable = true } 
+r2x-pypsa = { path = ".", editable = true }
 
 [tool.pytest.ini_options]
 pythonpath = [
   "src"
 ]
+log_cli = true
+log_cli_level = "INFO"
+log_cli_format = "%(asctime)s [%(levelname)8s] %(message)s"
+log_cli_date_format = "%Y-%m-%d %H:%M:%S"
+# Capture logs during test execution, not just collection
+addopts = "-v --log-cli-level=INFO"

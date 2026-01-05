@@ -1,0 +1,12 @@
+carrier,pypsa_capacity_mw,sienna_capacity_mw,difference_mw,difference_pct,match
+CCGT,42067.700000000004,0.0,42067.700000000004,100.0,False
+OCGT,25331.7,0.0,25331.7,100.0,False
+biomass,137.0,0.0,137.0,100.0,False
+coal,14329.7,14329.7,0.0,0.0,True
+gas,0.0,67399.39999999995,-67399.39999999995,inf,False
+hydro,555.1,555.1,0.0,0.0,True
+nuclear,5138.6,5138.6,0.0,0.0,True
+oil,886.9,886.9,0.0,0.0,True
+onwind,34363.6,34363.59999999999,7.275957614183426e-12,2.117344403433699e-14,True
+other,0.0,137.0,-137.0,inf,False
+solar,30326.0,30326.0,0.0,0.0,True

@@ -12,6 +12,7 @@ from r2x_pypsa.serialization.utils import (
     convert_to_per_unit,
     create_voltage_from_pypsa,
     create_minmax_from_pypsa,
+    create_updown_from_pypsa,
     create_fromto_tofrom_from_pypsa,
     create_inputoutput_from_pypsa,
 )
@@ -27,6 +28,7 @@ __all__ = [
     "convert_to_per_unit",
     "create_voltage_from_pypsa",
     "create_minmax_from_pypsa",
+    "create_updown_from_pypsa",
     "create_fromto_tofrom_from_pypsa",
     "create_inputoutput_from_pypsa",
     "create_operational_cost",

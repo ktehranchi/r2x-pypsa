@@ -35,20 +35,33 @@ def cli_arguments(parser: ArgumentParser):
 class PypsaParser(BaseParser):
     """Parser for PyPSA networks to R2X System format."""
     
-    def __init__(self, netcdf_file: str | Path, weather_year: Optional[int] = None):
-        self.netcdf_file = Path(netcdf_file)
+    def __init__(self, netcdf_file: Optional[str | Path] = None, weather_year: Optional[int] = None, network: Optional[pypsa.Network] = None):
+        """
+        Initialize PypsaParser.
+        
+        Args:
+            netcdf_file: Path to PyPSA netcdf file (required if network is not provided)
+            weather_year: Optional weather year
+            network: Optional pre-loaded PyPSA network object (if provided, netcdf_file is ignored)
+        """
+        if network is None and netcdf_file is None:
+            raise ValueError("Either 'network' or 'netcdf_file' must be provided")
+            
+        self.netcdf_file = Path(netcdf_file) if netcdf_file else None
         self.weather_year = weather_year
-        self.network: Optional[pypsa.Network] = None
+        self.network: Optional[pypsa.Network] = network
         
     def build_system(self) -> System:
         """Build R2X System from PyPSA network."""
-        if not self.netcdf_file.exists():
-            raise FileNotFoundError(f"PyPSA netcdf file not found: {self.netcdf_file}")
-            
-        logger.info(f"Loading PyPSA network from: {self.netcdf_file}")
-        
-        # Load PyPSA network
-        self.network = pypsa.Network(str(self.netcdf_file))
+        # Load network from file if not already provided
+        if self.network is None:
+            if not self.netcdf_file.exists():
+                raise FileNotFoundError(f"PyPSA netcdf file not found: {self.netcdf_file}")
+                
+            logger.info(f"Loading PyPSA network from: {self.netcdf_file}")
+            self.network = pypsa.Network(str(self.netcdf_file))
+        else:
+            logger.info("Using pre-loaded PyPSA network")
         
         # Create R2X system
         system = System()
@@ -190,7 +203,14 @@ class PypsaParser(BaseParser):
                 logger.debug(f"Added generator {gen_name} with carrier {gen_data.get('carrier', 'unknown')}")
                 
             except Exception as e:
-                logger.warning(f"Failed to process generator {gen_name}: {e}")
+                carrier = gen_data.get('carrier', 'unknown')
+                p_nom = gen_data.get('p_nom', 0.0)
+                # Check if it's a renewable generator
+                is_renewable = carrier in ['solar', 'onwind', 'offwind', 'offwind_floating', 'wind', 'hydro', 'ror']
+                gen_type = "renewable" if is_renewable else "thermal/other"
+                logger.warning(
+                    f"Failed to process {gen_type} generator {gen_name} (carrier={carrier}, p_nom={p_nom}): {e}"
+                )
                 continue
     
     def _process_storage_units(self, system: System) -> None:

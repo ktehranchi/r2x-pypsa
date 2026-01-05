@@ -78,21 +78,37 @@ def _(
         start_up_cost = get_pypsa_property(system, pypsa_component, "start_up_cost")
         shut_down_cost = get_pypsa_property(system, pypsa_component, "shut_down_cost")
         
+        # Debug logging for generators with positive costs
+        if marginal_cost is not None and marginal_cost > 0:
+            logger.debug(f"Thermal generator {pypsa_component.name}: marginal_cost={marginal_cost}, type={type(marginal_cost)}, >0 check={marginal_cost > 0 if marginal_cost is not None else 'N/A'}")
+        
         # If no cost data available, return None
         if marginal_cost is None and marginal_cost_quadratic is None:
             return None
 
         # Create variable cost curve
         variable = None
-        if marginal_cost is not None and marginal_cost > 0:
+        # IMPORTANT: Allow negative marginal costs (e.g., renewables with tax credits)
+        # Only use 0.0 if marginal_cost is None or exactly 0.0
+        if marginal_cost is not None and marginal_cost != 0.0:
             variable = CostCurve(
-                value_curve=LinearCurve(marginal_cost),
+                value_curve=LinearCurve(float(marginal_cost)),
                 power_units=UnitSystem.NATURAL_UNITS
             )
+            if marginal_cost > 0:
+                logger.debug(f"Created cost curve for {pypsa_component.name} with marginal_cost={marginal_cost}")
         else:
             variable = CostCurve(
                 value_curve=LinearCurve(0.0),
                 power_units=UnitSystem.NATURAL_UNITS
+            )
+        
+        # Warn if quadratic cost is present but not used
+        if marginal_cost_quadratic is not None and marginal_cost_quadratic != 0.0:
+            logger.warning(
+                f"Generator {pypsa_component.name} has marginal_cost_quadratic={marginal_cost_quadratic}, "
+                f"but quadratic costs are not supported in the Python infrasys package. "
+                f"Using only linear cost (marginal_cost={marginal_cost})."
             )
 
         return ThermalGenerationCost(
@@ -179,11 +195,21 @@ def _(
         # Extract cost data from PyPSA component
         marginal_cost = get_pypsa_property(system, pypsa_component, "marginal_cost")
         
-        # Create variable cost curve (default to 0.0 if no cost specified)
+        # Create variable cost curve (allow negative costs for renewables with tax credits)
+        # Use 0.0 only if marginal_cost is None, otherwise use the actual value (can be negative)
+        if marginal_cost is None:
+            marginal_cost_value = 0.0
+        else:
+            marginal_cost_value = float(marginal_cost)
+        
         variable = CostCurve(
-            value_curve=LinearCurve(marginal_cost or 0.0),
+            value_curve=LinearCurve(marginal_cost_value),
             power_units=UnitSystem.NATURAL_UNITS
         )
+        
+        # Debug logging for negative costs
+        if marginal_cost_value < 0:
+            logger.debug(f"Renewable generator {pypsa_component.name}: negative marginal_cost={marginal_cost_value}")
         
         # Create curtailment cost curve (default to 0.0)
         curtailment_cost = CostCurve(
