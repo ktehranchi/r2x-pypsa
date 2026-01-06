@@ -453,17 +453,12 @@ def test_e2e_economic_dispatch():
     # Optimize with tight tolerances for better precision
     network.optimize(
         snapshots=network.snapshots[0:7*24],
-        solver_name='gurobi',
-        solver_options={
-            'OptimalityTol': 1e-9,
-            'FeasibilityTol': 1e-9,
-            'IntFeasTol': 1e-9,
-        }
+        solver_name='highs',
     )
 
     # Verify optimization completed successfully
     assert network.objective is not None
-    logger.info(f"Optimization completed with gurobi, total objective: {network.objective}")
+    logger.info(f"Optimization completed with highs, total objective: {network.objective}")
     
     # Calculate operational costs only (marginal_cost × generation)
     # This matches what Sienna ED includes
@@ -1904,10 +1899,10 @@ def main():
 
     network.loads_t.p_set *= 0.75 
 
-    logger.info("Starting optimization with Gurobi...")
+    logger.info("Starting optimization with HiGHS...")
     network.optimize(
         snapshots=network.snapshots[0:7*24],
-        solver_name='gurobi'
+        solver_name='highs'
     )
     
     logger.info(f"Optimization completed! Objective: {network.objective}")

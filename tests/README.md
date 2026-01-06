@@ -122,5 +122,25 @@ Demo script for parsing a PyPSA network interactively.
 **"Run test_e2e_economic_dispatch first"**  
 → Generate JSON first: `uv run pytest tests/test_end_to_end.py::test_e2e_economic_dispatch`
 
-**"Julia script failed"**  
+**"Julia script failed"**
 → Check Julia packages: `julia --project=tests -e 'using PowerSystems, PowerSimulations, Gurobi'`
+
+**"KeyError: key 'compression_enabled' not found" when loading system in Julia**
+→ The H5 file is missing compression attributes required by newer `InfrastructureSystems.jl`.
+  This is a version mismatch between Python's H5 writer and Julia's reader.
+
+  **Hotfix**: Add the missing attributes manually:
+
+  ```julia
+  using HDF5
+  h5open("path/to/file.h5", "r+") do f
+      ts_group = f["time_series"]
+      HDF5.write_attribute(ts_group, "compression_enabled", false)
+      HDF5.write_attribute(ts_group, "compression_type", "DEFLATE")
+      HDF5.write_attribute(ts_group, "compression_level", 3)
+      HDF5.write_attribute(ts_group, "compression_shuffle", true)
+  end
+  ```
+
+  **Fixed in**: `src/r2x_pypsa/serialization/to_sienna.py` (lines 608-612).
+  The H5 serialization now includes these compression attributes automatically.

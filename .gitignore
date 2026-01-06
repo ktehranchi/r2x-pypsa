@@ -7,3 +7,7 @@ __pycache__
 *.DS_STORE
 test_output.json
 time_series_storage.h5
+tests/test_output/
+tests/julia/ra_test_output/
+.cursorrules
+.claude/

@@ -1,16 +1,31 @@
+name = "r2x-pypsa-tests"
+
 [deps]
 CSV = "336ed68f-0bac-5ca0-87d4-7b16caf5d00b"
 DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
 Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
+Gurobi = "2e9cd046-0924-5485-92f1-d5272153d98b"
+HDF5 = "f67ccb44-e63f-5c2f-98bd-6dc0ccc4ba2f"
+HiGHS = "87dc4568-4c63-4d18-b0c0-bb2238e4078b"
+HydroPowerSimulations = "fc1677e0-6ad7-4515-bf3a-bd6bf20a0b1b"
+JuMP = "4076af6c-e467-56ae-b986-b466b2749572"
+MathOptInterface = "b8f27783-ece8-5eb3-8dc8-9495eed66fee"
 Plots = "91a5bcdd-55d7-5caf-9e0b-520d859cae80"
+PowerSimulations = "e690365d-45e2-57bb-ac84-44ba829e73c4"
 PowerSystems = "bcd98974-b02a-5e2f-9ee0-a103f5c450dd"
 SiennaPRASInterface = "4b496c86-8d00-441d-b504-079c710e0aa7"
 Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+StorageSystemsSimulations = "e2f1a126-19d0-4674-9252-42b2384f8e3c"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
-
-[sources]
-SiennaPRASInterface = {url = "https://github.com/NREL-Sienna/SiennaPRASInterface.jl.git"}
+TimeSeries = "9e3dc215-6440-5c97-bce1-76c03772f85e"
 
 [compat]
+Gurobi = "1.7.6"
+HydroPowerSimulations = "0.12"
+PowerSimulations = "0.31.0"
+PowerSystems = "5.2.0"
+StorageSystemsSimulations = "0.13"
 julia = "≥1.9"
-PowerSystems = "≥3.0"
+
+[sources.SiennaPRASInterface]
+url = "https://github.com/NREL-Sienna/SiennaPRASInterface.jl.git"

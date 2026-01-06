@@ -751,6 +751,9 @@ def plot_side_by_side_energy_balance(pypsa_df, sienna_df, carrier_colors, timest
     
     # Identify load carriers (common names: 'load', 'AC', 'loads')
     load_carriers = {'load', 'AC', 'loads', 'demand'}
+
+    # Carriers to exclude from dispatch plots (not actual generation)
+    exclude_carriers = {'interchange'}  # Transfer between regions, not generation
     
     # Debug: log unique carriers to see what we have
     logger.debug(f"PyPSA unique carriers (after mapping): {sorted(pypsa_df_mapped['carrier'].unique())}")
@@ -761,9 +764,10 @@ def plot_side_by_side_energy_balance(pypsa_df, sienna_df, carrier_colors, timest
     pypsa_generators_df = pypsa_df_mapped[~pypsa_load_mask].copy()
     pypsa_load_df = pypsa_df_mapped[pypsa_load_mask].copy()
     
-    # Separate load from generators for Sienna
+    # Separate load from generators for Sienna (also exclude interchange)
     sienna_load_mask = sienna_df_mapped['carrier'].str.upper().isin([c.upper() for c in load_carriers])
-    sienna_generators_df = sienna_df_mapped[~sienna_load_mask].copy()
+    sienna_exclude_mask = sienna_df_mapped['carrier'].str.lower().isin([c.lower() for c in exclude_carriers])
+    sienna_generators_df = sienna_df_mapped[~sienna_load_mask & ~sienna_exclude_mask].copy()
     sienna_load_df = sienna_df_mapped[sienna_load_mask].copy()
     
     logger.debug(f"PyPSA load records: {len(pypsa_load_df)}, Sienna load records: {len(sienna_load_df)}")
