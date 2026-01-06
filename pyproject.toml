@@ -4,7 +4,8 @@ version = "0.1.0"
 description = "PyPSA to R2X parser and converter"
 readme = "README.md"
 dependencies = [
-    "r2x>=1.1.0",
+    "r2x",
+    "infrasys>=1.0.0",
     "pypsa==0.35.2",
     "pandas",
     "loguru",
@@ -15,8 +16,9 @@ dependencies = [
 requires-python = ">=3.11"
 
 [tool.uv.sources]
-r2x = { git = "https://github.com/NREL/r2x", branch = "v2.0.0" }
+r2x = { git = "https://github.com/NREL/R2X", branch = "kt/v2_pre_r2xsienna" }
 r2x-pypsa = { path = ".", editable = true }
+infrasys = { git = "https://github.com/NREL/infrasys", tag = "v1.0.0" }
 
 [tool.pytest.ini_options]
 pythonpath = [

@@ -85,14 +85,14 @@ function test_load_serialized_system()
                 println("  Storage Units: $(length(storage))")
                 
                 # Test that we have at least some components
-                @test length(buses) > 0 "System should have at least one bus"
-                @test (length(thermal_gens) + length(renewable_gens) + length(hydro_gens)) > 0 "System should have at least one generator"
+                @test length(buses) > 0
+                @test (length(thermal_gens) + length(renewable_gens) + length(hydro_gens)) > 0
                 
                 println("\n✓ System validation completed successfully!")
                 
             catch e
                 println("✗ Error during system validation: $e")
-                @test false "System validation failed: $e"
+                @test false  # System validation failed
             end
         end
     end

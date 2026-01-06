@@ -605,6 +605,11 @@ def infrasys_to_psy(
             with h5py.File(time_series_storage_file, "r+") as f:
                 if "time_series" in f:
                     f["time_series"].attrs["data_format_version"] = "2.0.0"
+                    # Add compression attributes required by newer InfrastructureSystems.jl
+                    f["time_series"].attrs["compression_enabled"] = False
+                    f["time_series"].attrs["compression_type"] = "DEFLATE"
+                    f["time_series"].attrs["compression_level"] = 3
+                    f["time_series"].attrs["compression_shuffle"] = True
         except Exception:
             pass  # If we can't update it, that's okay
         logger.info(f"✓ HDF5 file created successfully: {time_series_storage_file}")

@@ -7,9 +7,9 @@
 # Always loads system from JSON and creates template fresh (no caching).
 
 # Activate local environment for reproducible package versions
-# Note: Can also use `julia --project=tests` flag to activate before script runs
+# Note: Can also use `julia --project=tests/julia` flag to activate before script runs
 import Pkg
-Pkg.activate(@__DIR__)
+Pkg.activate(joinpath(@__DIR__, "julia"))
 
 using PowerSystems
 using PowerSystems: get_time_series_array, DeterministicSingleTimeSeries, PrimeMovers
@@ -18,7 +18,7 @@ using PowerSimulations: ActivePowerTimeSeriesParameter, ActivePowerVariable, Act
 using JuMP
 using MathOptInterface
 const MOI = MathOptInterface
-using Gurobi
+using HiGHS
 using Dates
 using Serialization
 using TimeSeries
@@ -1129,12 +1129,10 @@ model = DecisionModel(
     sys;
     name = "ED",
     optimizer = optimizer_with_attributes(
-        Gurobi.Optimizer, 
-        "OutputFlag" => 1,  # Enable output to see infeasibility details
-        "LogToConsole" => 1,
-        "OptimalityTol" => 1e-9,  # Tight tolerance for better precision
-        "FeasibilityTol" => 1e-9,  # Tight tolerance for better precision
-        "IntFeasTol" => 1e-9,  # Tight tolerance for better precision
+        HiGHS.Optimizer,
+        "output_flag" => true,  # Enable output to see details
+        "primal_feasibility_tolerance" => 1e-9,  # Tight tolerance for better precision
+        "dual_feasibility_tolerance" => 1e-9,  # Tight tolerance for better precision
     ),
     system_to_file = false,
     resolution = Hour(1),  # Explicitly set resolution to Hour(1)
