@@ -36,7 +36,7 @@ This test:
 After running steps 1-2, compare dispatch visually:
 
 ```bash
-uv run python tests/tools/compare_dispatch_visual.py \
+uv run python tests/compare_dispatch_visual.py \
     --network tests/data/test_network_1h.nc \
     --pypsa-dispatch tests/test_output/pypsa_dispatch.csv \
     --sienna-dispatch tests/test_output/sienna_dispatch.csv \
@@ -131,23 +131,3 @@ Standalone scripts for debugging and analysis (not part of automated tests):
 
 **"Julia script failed"**
 → Check Julia packages: `julia --project=tests/julia -e 'using PowerSystems, PowerSimulations, Gurobi'`
-
-**"KeyError: key 'compression_enabled' not found" when loading system in Julia**
-→ The H5 file is missing compression attributes required by newer `InfrastructureSystems.jl`.
-  This is a version mismatch between Python's H5 writer and Julia's reader.
-
-  **Hotfix**: Add the missing attributes manually:
-
-  ```julia
-  using HDF5
-  h5open("path/to/file.h5", "r+") do f
-      ts_group = f["time_series"]
-      HDF5.write_attribute(ts_group, "compression_enabled", false)
-      HDF5.write_attribute(ts_group, "compression_type", "DEFLATE")
-      HDF5.write_attribute(ts_group, "compression_level", 3)
-      HDF5.write_attribute(ts_group, "compression_shuffle", true)
-  end
-  ```
-
-  **Fixed in**: `src/r2x_pypsa/serialization/to_sienna.py` (lines 608-612).
-  The H5 serialization now includes these compression attributes automatically.

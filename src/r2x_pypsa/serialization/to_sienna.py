@@ -301,7 +301,7 @@ def serialize_component_to_psy(
         include = []
 
     if not data:
-        breakpoint()
+        # breakpoint()
         return None
 
     # Python problems
@@ -535,26 +535,20 @@ def infrasys_to_psy(
         f.write(dumped_data)
 
     # Set scaling_factor_multiplier for time series
-    # For PowerLoad: Time series are stored in MW (not per-unit), so NO scaling_factor_multiplier needed
-    #   Note: Load time series are named "active_power" (not "max_active_power") to avoid
-    #   PowerSystems v5 bug where get_max_active_power() returns MW instead of per-unit.
-    #   PowerSimulations StaticPowerLoad will use the time series values directly in MW.
-    # For generators: use get_max_active_power (like r2x-plexos, works in v5)
+    # Time series are stored in per-unit (0-1), where 1.0 represents max capacity/load
+    # PowerSimulations multiplies time series values by scaling_factor_multiplier to get MW
+    # For ALL components (generators, storage, and loads): use get_max_active_power
+    # This matches r2x-plexos behavior and ensures correct scaling in PowerSimulations
     scaling_factor_max = orjson.dumps(
         {"__metadata__": {"function": "get_max_active_power", "module": "PowerSystems"}}
     ).decode()
 
     with system._time_series_mgr._metadata_store._con as conn:
-        # For PowerLoad: Time series are stored in per-unit (0-1, where 1.0 = max_active_power)
-        # PowerSimulations StaticPowerLoad multiplies by get_max_active_power() (in MW) to get MW
-        # So NO scaling_factor_multiplier needed - PowerSimulations handles the scaling
-        # Do NOT set scaling_factor_multiplier for PowerLoad
-        # For generators, use get_max_active_power (like r2x-plexos)
         conn.execute(
             """
             UPDATE time_series_associations
             SET scaling_factor_multiplier = IFNULL(scaling_factor_multiplier, '') || ?
-            WHERE owner_type IN ('ThermalStandard', 'RenewableDispatch', 'EnergyReservoirStorage')
+            WHERE owner_type IN ('ThermalStandard', 'RenewableDispatch', 'EnergyReservoirStorage', 'PowerLoad')
             """,
             (scaling_factor_max,),
         )
