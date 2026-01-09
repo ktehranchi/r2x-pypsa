@@ -13,6 +13,15 @@ r2x-pypsa serves as a bridge between PyPSA and the R2X/Sienna ecosystem, enablin
 
 This package integrates with the [R2X framework](https://github.com/NREL/R2X) as a plugin, providing parser and exporter capabilities for PyPSA networks.
 
+> **Note: Current Transmission Model Limitations**
+>
+> r2x-pypsa currently only supports **zonal (AreaInterchange) transmission models**. PyPSA `Link` components are converted to Sienna `AreaInterchange` objects representing inter-area power transfer limits.
+>
+> The following transmission models are **not yet supported**:
+>
+> - AC transmission lines (`Line` → `ACBranch`)
+> - HVDC lines (`Link` with HVDC characteristics → `TwoTerminalHVDCLine`)
+
 ## Features
 
 - Full support for PyPSA component types:
