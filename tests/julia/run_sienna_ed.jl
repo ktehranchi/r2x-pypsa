@@ -638,24 +638,20 @@ try
         local total_thermal_min = 0.0  # Track minimum generation requirements
         
         # Sum loads at this time step
-        # Compare with working code: it uses get_max_active_power() which returns MW
-        # For time step, we need actual load at that time, not max
-        # Time series are stored in per-unit (0-1), multiply by max_active_power to get MW
+        # Time series values are already scaled to MW via scaling_factor_multiplier = get_max_active_power
         for load in loads
             try
                 ts_data = get_time_series_array(DeterministicSingleTimeSeries, load, "max_active_power")
                 if ts_data !== nothing && length(ts_data) > step
                     ts_value = TimeSeries.values(ts_data)[step]
-                    # Time series is in per-unit (0-1), multiply by max_active_power to get MW
-                    max_load = get_max_active_power(load)  # Already in MW with NATURAL_UNITS
-                    load_val = abs(ts_value) * max_load
-                    total_load += load_val
+                    # Time series already in MW (scaled by scaling_factor_multiplier)
+                    total_load += abs(ts_value)
                 else
-                    # No time series, use static max (same as working code)
+                    # No time series, use static max
                     total_load += get_max_active_power(load)
                 end
             catch
-                # Use static value if no time series (same as working code)
+                # Use static value if no time series
                 total_load += get_max_active_power(load)
             end
         end
@@ -793,10 +789,8 @@ try
                 local ts_data = get_time_series_array(DeterministicSingleTimeSeries, load, "max_active_power")
                 if ts_data !== nothing && length(ts_data) > timestep
                     local ts_value = TimeSeries.values(ts_data)[timestep]
-                    # Time series is in per-unit (0-1), multiply by max_active_power to get MW
-                    local max_load = get_max_active_power(load)  # Already in MW with NATURAL_UNITS
-                    local load_val = abs(ts_value) * max_load
-                    total_load_bus5 += load_val
+                    # Time series already in MW (scaled by scaling_factor_multiplier)
+                    total_load_bus5 += abs(ts_value)
                 else
                     # No time series, use static max
                     total_load_bus5 += get_max_active_power(load)
@@ -1702,22 +1696,21 @@ if objective !== nothing
                         try
                             # Get load time series data
                             ts_data = get_time_series_array(DeterministicSingleTimeSeries, load, "max_active_power")
-                            max_load = get_max_active_power(load)  # Already in MW with NATURAL_UNITS
-                            
+
                             if ts_data !== nothing
                                 ts_values = TimeSeries.values(ts_data)
                                 ts_timestamps = TimeSeries.timestamp(ts_data)
-                                
+
                                 # Add this load's contribution to each timestamp
+                                # Time series already in MW (scaled by scaling_factor_multiplier)
                                 for (i, ts_time) in enumerate(ts_timestamps)
                                     if ts_time in keys(load_by_time)
-                                        # Time series is in per-unit (0-1), multiply by max_load to get MW
-                                        load_value = abs(ts_values[i]) * max_load
-                                        load_by_time[ts_time] += load_value
+                                        load_by_time[ts_time] += abs(ts_values[i])
                                     end
                                 end
                             else
                                 # No time series, use static max load for all time steps
+                                max_load = get_max_active_power(load)
                                 for ts_time in time_range
                                     if ts_time in keys(load_by_time)
                                         load_by_time[ts_time] += max_load
