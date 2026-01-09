@@ -10,8 +10,8 @@ import argparse
 from loguru import logger
 import sys
 
-# Add parent directory to path to import helpers
-sys.path.insert(0, str(Path(__file__).parent))
+# Add tests directory to path to import helpers
+sys.path.insert(0, str(Path(__file__).parent.parent / "tests"))
 from helpers import plot_generator_marginal_costs
 
 
@@ -1389,13 +1389,13 @@ def main():
     parser.add_argument(
         '--network-file',
         type=str,
-        default='tests/data/elec_s380_c7a_ec_lv1.5_RPS-REM-TCT-1h_E.nc',
+        default='tests/data/test_network_1h.nc',
         help='Path to PyPSA network file (for carrier colors)'
     )
     parser.add_argument(
         '--sienna-json',
         type=str,
-        default='tests/test_output/elec_s380_c7a_ec_lv1_output_optimized.json',
+        default='tests/test_output/test_network_1h_output_optimized.json',
         help='Path to Sienna system JSON file (for marginal costs)'
     )
     parser.add_argument(

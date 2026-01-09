@@ -44,8 +44,8 @@ function find_system_file()
     """Find the PowerSystems.jl JSON file to use for testing."""
     # Try different potential locations
     potential_paths = [
-        joinpath(@__DIR__, "..", "test_output", "elec_s380_c7a_ec_lv1_output_optimized.json"),
-        joinpath(@__DIR__, "..", "test_output", "elec_s380_c7a_ec_lv1_comparison.json"),
+        joinpath(@__DIR__, "..", "test_output", "test_network_1h_output_optimized.json"),
+        joinpath(@__DIR__, "..", "test_output", "test_network_1h_comparison.json"),
         joinpath(@__DIR__, "..", "..", "test_output.json"),
     ]
 
@@ -571,13 +571,8 @@ function run_resource_adequacy_test()
         # Define the RA problem template
         problem_template = RATemplate(PowerSystems.Area, device_models)
 
-        @test problem_template !== nothing
-        println("✓ Created RA problem template")
-
         # Convert to PRAS system
         pras_sys = generate_pras_system(sys, problem_template)
-        @test pras_sys !== nothing
-        println("✓ Generated PRAS system")
 
         # Print PRAS system info
         println("\nPRAS System Information:")

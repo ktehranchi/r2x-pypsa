@@ -257,7 +257,7 @@ def compare_battery_parameters(network, json_file, h5_file):
 def test_end_to_end_pypsa_to_psy_conversion():
     """Test end-to-end conversion from PyPSA to PSY system."""
     # Use the test data
-    test_file = Path("tests/data/elec_s380_c7a_ec_lv1.5_RPS-REM-TCT-1h_E.nc")
+    test_file = Path("tests/data/test_network_1h.nc")
 
     parser = PypsaParser(netcdf_file=str(test_file))
     pypsa_system = parser.build_system()
@@ -285,7 +285,7 @@ def test_end_to_end_pypsa_to_psy_conversion():
     # Serialize the PSY system to Sienna format
     output_dir = Path("tests/test_output")
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_file = output_dir / "elec_s380_c7a_ec_lv1_output.json"
+    output_file = output_dir / "test_network_1h_output.json"
     infrasys_to_psy(psy_system, filename=output_file)
     
     # Verify the output file was created
@@ -308,7 +308,7 @@ def test_e2e_economic_dispatch():
         CLUSTER_NETWORK=1 pytest tests/test_end_to_end.py::test_e2e_economic_dispatch
     """
     # Use the test data
-    test_file = Path("tests/data/elec_s380_c7a_ec_lv1.5_RPS-REM-TCT-1h_E.nc")
+    test_file = Path("tests/data/test_network_1h.nc")
     network = pypsa.Network(test_file)
 
     # Optional: Cluster network to make it a copper plate
@@ -695,7 +695,7 @@ def test_e2e_economic_dispatch():
 
     # Serialize the PSY system to Sienna format
     # (output_dir already created above)
-    output_file = output_dir / "elec_s380_c7a_ec_lv1_output_optimized.json"
+    output_file = output_dir / "test_network_1h_output_optimized.json"
     infrasys_to_psy(psy_system, filename=output_file)
     
     # Verify the output file was created
@@ -717,7 +717,7 @@ def test_pypsa_sienna_objective_match(caplog):
     - tests/test_output/sienna_objective.txt (created by running run_sienna_ed.jl manually)
     
     To run Sienna optimization manually:
-        julia tests/run_sienna_ed.jl tests/test_output/elec_s380_c7a_ec_lv1_output_optimized.json tests/test_output/sienna_objective.txt
+        julia tests/julia/run_sienna_ed.jl tests/test_output/test_network_1h_output_optimized.json tests/test_output/sienna_objective.txt
     """
     import logging
     # Use Python's standard logging so it appears in pytest output
@@ -743,7 +743,7 @@ def test_pypsa_sienna_objective_match(caplog):
         raise FileNotFoundError(
             f"Sienna objective file not found: {sienna_objective_file}\n"
             "Run the Julia script manually:\n"
-            f"  julia tests/run_sienna_ed.jl tests/test_output/elec_s380_c7a_ec_lv1_output_optimized.json tests/test_output/sienna_objective.txt"
+            f"  julia tests/julia/run_sienna_ed.jl tests/test_output/test_network_1h_output_optimized.json tests/test_output/sienna_objective.txt"
         )
     
     # Read objectives from files
@@ -808,13 +808,13 @@ def test_compare_pypsa_sienna_systems():
     force_regenerate = os.getenv("FORCE_REGENERATE", "0").lower() in ("1", "true", "yes")
     
     # Load PyPSA network
-    test_file = Path("tests/data/elec_s380_c7a_ec_lv1.5_RPS-REM-TCT-1h_E.nc")
+    test_file = Path("tests/data/test_network_1h.nc")
     
     # Set up output files
     test_dir = Path(__file__).parent
     output_dir = test_dir / "test_output"
     output_dir.mkdir(parents=True, exist_ok=True)
-    json_file = output_dir / "elec_s380_c7a_ec_lv1_comparison.json"
+    json_file = output_dir / "test_network_1h_comparison.json"
     h5_file = output_dir / f"{json_file.stem}.h5"
     
     # Check if we can use cached files
@@ -1687,7 +1687,7 @@ def test_compare_pypsa_sienna_systems():
         logger.info(f"\nChecking for reserve margins or constraints requiring extra generation...")
         
         # Check if network has been optimized and has model
-        test_file = Path("tests/data/elec_s380_c7a_ec_lv1.5_RPS-REM-TCT-1h_E.nc")
+        test_file = Path("tests/data/test_network_1h.nc")
         network_check = pypsa.Network(test_file)
         
         # Apply same modifications as in test
@@ -1889,7 +1889,7 @@ def test_compare_pypsa_sienna_systems():
 
 def main():
     """Test market clearing with gurobi."""
-    test_file = Path("tests/data/elec_s380_c7a_ec_lv1.5_RPS-REM-TCT-1h_E.nc")
+    test_file = Path("tests/data/test_network_1h.nc")
     network = pypsa.Network(test_file)
 
     for component in network.components.keys():

@@ -2,7 +2,7 @@
 
 julia_version = "1.10.4"
 manifest_format = "2.0"
-project_hash = "a59a685ecc34bcdeaa3fe0c224b762b9527ffcad"
+project_hash = "594dfe2f379823e97c123435e93718aa41fec4cc"
 
 [[deps.ADTypes]]
 git-tree-sha1 = "f7304359109c768cf32dc5fa2d371565bb63b68a"
@@ -1241,6 +1241,12 @@ deps = ["CSV", "DataFrames", "DataFramesMeta", "DataStructures", "Dates", "Distr
 git-tree-sha1 = "e0eea4ad8322ea2c83293df961d55cc84e7ca2fa"
 uuid = "e690365d-45e2-57bb-ac84-44ba829e73c4"
 version = "0.31.0"
+
+[[deps.PowerSystemCaseBuilder]]
+deps = ["CSV", "DataFrames", "DataStructures", "Dates", "DocStringExtensions", "Downloads", "HDF5", "InfrastructureSystems", "JSON3", "LazyArtifacts", "PowerSystems", "PrettyTables", "Random", "SHA", "TimeSeries"]
+git-tree-sha1 = "898d884fc84bb783c814d85402b80de08fc24f84"
+uuid = "f00506e0-b84f-492a-93c2-c0a9afc4364e"
+version = "2.1.1"
 
 [[deps.PowerSystems]]
 deps = ["CSV", "DataFrames", "DataStructures", "Dates", "DocStringExtensions", "InfrastructureSystems", "InteractiveUtils", "JSON3", "LinearAlgebra", "Logging", "PowerFlowData", "PrettyTables", "TimeSeries", "UUIDs", "Unicode", "YAML"]

@@ -23,7 +23,7 @@ def test_psy_serialization_generator() -> None:
     from infrasys import TimeSeriesStorageType
     
     # Use the same test file as e2e test
-    test_file = Path("tests/data/elec_s380_c7a_ec_lv1.5_RPS-REM-TCT-1h_E.nc")
+    test_file = Path("tests/data/test_network_1h.nc")
     if not test_file.exists():
         pytest.skip(f"Test network file not found: {test_file}")
     

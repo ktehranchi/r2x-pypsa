@@ -345,7 +345,7 @@ def compare_detailed(pypsa_data, sienna_data, output_dir, timesteps=None):
 
 def main():
     """Main comparison function."""
-    test_file = Path("tests/data/elec_s380_c7a_ec_lv1.5_RPS-REM-TCT-1h_E.nc")
+    test_file = Path("tests/data/test_network_1h.nc")
     output_dir = Path("tests/test_output")
     sienna_dispatch_file = output_dir / "sienna_dispatch.csv"
     

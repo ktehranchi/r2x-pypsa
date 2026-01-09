@@ -138,7 +138,7 @@ def plot_renewable_totals():
     print_nuclear_time_series(pypsa_df, sienna_df, first_4_days_start)
     
     # Check total generation vs load for first 4 days
-    test_file = Path("tests/data/elec_s380_c7a_ec_lv1.5_RPS-REM-TCT-1h_E.nc")
+    test_file = Path("tests/data/test_network_1h.nc")
     check_total_generation_vs_load(pypsa_df, sienna_df, first_4_days_start, first_4_days_end, test_file)
 
 

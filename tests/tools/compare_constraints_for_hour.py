@@ -441,9 +441,9 @@ def compare_constraints_for_hour():
     """Compare constraint values for Jan 3rd evening."""
     
     # Paths
-    test_file = Path("tests/data/elec_s380_c7a_ec_lv1.5_RPS-REM-TCT-1h_E.nc")
-    json_file = Path("tests/test_output/elec_s380_c7a_ec_lv1_comparison.json")
-    h5_file = Path("tests/test_output/elec_s380_c7a_ec_lv1_comparison.h5")
+    test_file = Path("tests/data/test_network_1h.nc")
+    json_file = Path("tests/test_output/test_network_1h_comparison.json")
+    h5_file = Path("tests/test_output/test_network_1h_comparison.h5")
     sienna_dispatch_file = Path("tests/test_output/sienna_dispatch.csv")
     
     logger.info("=" * 80)

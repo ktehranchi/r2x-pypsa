@@ -223,12 +223,12 @@ def test_solar_capacity_factors_match():
     from test_helpers import get_sienna_capacity_factors
     
     # Load PyPSA network
-    network = pypsa.Network("tests/data/elec_s380_c7a_ec_lv1.5_RPS-REM-TCT-1h_E.nc")
+    network = pypsa.Network("tests/data/test_network_1h.nc")
     
     # Load Sienna system
     test_dir = Path(__file__).parent
-    sienna_json = test_dir / "test_output" / "elec_s380_c7a_ec_lv1_output_optimized.json"
-    sienna_h5 = test_dir / "test_output" / "elec_s380_c7a_ec_lv1_output_optimized.h5"
+    sienna_json = test_dir / "test_output" / "test_network_1h_output_optimized.json"
+    sienna_h5 = test_dir / "test_output" / "test_network_1h_output_optimized.h5"
     
     # Skip if files don't exist
     if not sienna_json.exists() or not sienna_h5.exists():

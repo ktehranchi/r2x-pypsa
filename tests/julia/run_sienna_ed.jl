@@ -9,7 +9,7 @@
 # Activate local environment for reproducible package versions
 # Note: Can also use `julia --project=tests/julia` flag to activate before script runs
 import Pkg
-Pkg.activate(joinpath(@__DIR__, "julia"))
+Pkg.activate(joinpath(@__DIR__))
 
 using PowerSystems
 using PowerSystems: get_time_series_array, DeterministicSingleTimeSeries, PrimeMovers
@@ -61,7 +61,7 @@ if length(ARGS) >= 2
     output_file = ARGS[2]
 else
     # Default paths for REPL usage
-    json_file = "test_output/elec_s380_c7a_ec_lv1_output_optimized.json"
+    json_file = "test_output/test_network_1h_output_optimized.json"
     output_file = "test_output/sienna_objective.txt"
     println("Using default paths (run with args for custom paths):")
     println("  JSON: $json_file")
