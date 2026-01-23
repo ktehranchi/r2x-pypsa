@@ -466,7 +466,7 @@ def _(
             # So constraint will be: ts_value * p_nom = (p_max_pu * p_nom) which is correct
             ts = create_single_time_series_from_pandas(ts_data, "max_active_power")
             psy_system.add_time_series(ts, generator)
-            logger.info(f"Added time series for generator {component.name} (length: {len(ts_data)}, stored in per-unit 0-1)")
+            logger.debug(f"Added time series for generator {component.name} (length: {len(ts_data)}, stored in per-unit 0-1)")
         else:
             logger.debug(f"Generator {component.name} p_max_pu has no time series")
 
