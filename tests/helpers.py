@@ -52,7 +52,8 @@ def plot_generator_marginal_costs(network):
     ax.legend(handles=handles, title="Carrier", fontsize=14, title_fontsize=16, loc="center left", bbox_to_anchor=(1.02, 0.5))
 
     plt.tight_layout()
-    plt.show()
+    plt.close()
+    # plt.show()
 
 
 def plot_energy_balance(network, timesteps, label="PyPSA"):
@@ -111,7 +112,8 @@ def plot_energy_balance(network, timesteps, label="PyPSA"):
     # Combine legends from both plots
     handles, labels = ax.get_legend_handles_labels()
     ax.legend(handles, labels, bbox_to_anchor=(1, 0), loc="lower left", title=None, ncol=1)
-    plt.show()
+    plt.close()
+    # plt.show()
     return fig, ax
 
 
@@ -187,8 +189,73 @@ def plot_sienna_energy_balance(dispatch_file, timesteps=None, label="Sienna"):
     ax.set_xlabel("Time")
     ax.legend(bbox_to_anchor=(1, 0), loc="lower left", title="Carrier", ncol=1)
     plt.tight_layout()
-    plt.show()
+    plt.close()
+    # plt.show()
     return fig, ax
+
+
+def plot_interchange_flows(pypsa_dispatch_file, sienna_dispatch_file=None, timesteps=None):
+    """
+    Plot link/interchange flows from PyPSA and optionally Sienna dispatch CSVs.
+
+    Parameters:
+    pypsa_dispatch_file: Path to PyPSA dispatch CSV (expects carrier='link' rows).
+    sienna_dispatch_file: Path to Sienna dispatch CSV (expects carrier='interchange' rows). Optional.
+    timesteps: Number of timesteps to plot (default: None, plots all).
+    """
+    from pathlib import Path
+
+    pypsa_dispatch_file = Path(pypsa_dispatch_file)
+    has_pypsa = pypsa_dispatch_file.exists()
+    has_sienna = sienna_dispatch_file is not None and Path(sienna_dispatch_file).exists()
+
+    if not has_pypsa and not has_sienna:
+        return None, None
+
+    num_panels = has_pypsa + has_sienna
+    fig, axes = plt.subplots(num_panels, 1, figsize=(12, 5 * num_panels), squeeze=False)
+    ax_idx = 0
+
+    if has_pypsa:
+        df = pd.read_csv(pypsa_dispatch_file)
+        df['DateTime'] = pd.to_datetime(df['DateTime'], errors='coerce')
+        df = df.dropna(subset=['DateTime'])
+        link_df = df[df['carrier'] == 'link']
+        if not link_df.empty:
+            pivot = link_df.pivot_table(index='DateTime', columns='name', values='value', aggfunc='sum').fillna(0)
+            if timesteps is not None:
+                pivot = pivot.iloc[:timesteps]
+            pivot.plot(ax=axes[ax_idx, 0], linewidth=1)
+            axes[ax_idx, 0].set_title("PyPSA Link Flows (p0)")
+            axes[ax_idx, 0].set_ylabel("Power (MW)")
+            axes[ax_idx, 0].set_xlabel("Time")
+            axes[ax_idx, 0].legend(bbox_to_anchor=(1, 0), loc="lower left", fontsize=8, ncol=1)
+            axes[ax_idx, 0].axhline(y=0, color='black', linewidth=0.5, linestyle='--')
+        else:
+            axes[ax_idx, 0].set_title("PyPSA Link Flows (no link data found)")
+        ax_idx += 1
+
+    if has_sienna:
+        df = pd.read_csv(Path(sienna_dispatch_file))
+        df['DateTime'] = pd.to_datetime(df['DateTime'], errors='coerce')
+        df = df.dropna(subset=['DateTime'])
+        interchange_df = df[df['carrier'] == 'interchange']
+        if not interchange_df.empty:
+            pivot = interchange_df.pivot_table(index='DateTime', columns='name', values='value', aggfunc='sum').fillna(0)
+            if timesteps is not None:
+                pivot = pivot.iloc[:timesteps]
+            pivot.plot(ax=axes[ax_idx, 0], linewidth=1)
+            axes[ax_idx, 0].set_title("Sienna AreaInterchange Flows")
+            axes[ax_idx, 0].set_ylabel("Power (MW)")
+            axes[ax_idx, 0].set_xlabel("Time")
+            axes[ax_idx, 0].legend(bbox_to_anchor=(1, 0), loc="lower left", fontsize=8, ncol=1)
+            axes[ax_idx, 0].axhline(y=0, color='black', linewidth=0.5, linestyle='--')
+        else:
+            axes[ax_idx, 0].set_title("Sienna AreaInterchange Flows (no interchange data found)")
+
+    plt.tight_layout()
+    plt.close()
+    return fig, axes
 
 
 def plot_capacity_comparison(network):
@@ -222,7 +289,8 @@ def plot_capacity_comparison(network):
 
     # Show the plot
     plt.tight_layout()
-    plt.show()
+    plt.close()
+    # plt.show()
 
 
 def validate_load_conversion(pypsa_network, sienna_json_path, num_timesteps=10):
@@ -354,3 +422,191 @@ def validate_load_conversion(pypsa_network, sienna_json_path, num_timesteps=10):
         'is_valid': is_valid,
         'comparison': comparison
     }
+
+
+def plot_solar_dispatch_comparison(
+    pypsa_dispatch_file,
+    sienna_dispatch_file,
+    output_dir=None,
+    hours=24,
+    top_n=20,
+    pypsa_carrier='solar',
+    sienna_carrier='PVe',
+):
+    """Plot per-generator solar dispatch for PyPSA vs Sienna over the first N hours.
+
+    Produces two plots:
+    1. A grid of subplots for the ``top_n`` generators with the largest total
+       absolute difference, each showing PyPSA and Sienna dispatch over time.
+    2. A bar chart ranking all solar generators by total absolute difference.
+
+    Parameters
+    ----------
+    pypsa_dispatch_file : str or Path
+        Path to the PyPSA dispatch CSV (columns: DateTime, name, carrier, value).
+    sienna_dispatch_file : str or Path
+        Path to the Sienna dispatch CSV (same schema).
+    output_dir : str or Path, optional
+        Directory for saving plots.  Defaults to the parent of *pypsa_dispatch_file*.
+    hours : int
+        Number of hours to plot (default 24).
+    top_n : int
+        Number of worst-matching generators to show in the grid plot (default 20).
+    pypsa_carrier : str
+        Carrier string used for solar in the PyPSA CSV (default ``'solar'``).
+    sienna_carrier : str
+        Carrier string used for solar in the Sienna CSV (default ``'PVe'``).
+    """
+    from pathlib import Path
+
+    pypsa_dispatch_file = Path(pypsa_dispatch_file)
+    sienna_dispatch_file = Path(sienna_dispatch_file)
+    if output_dir is None:
+        output_dir = pypsa_dispatch_file.parent
+    output_dir = Path(output_dir)
+
+    # --- Load data -----------------------------------------------------------
+    pypsa_df = pd.read_csv(pypsa_dispatch_file)
+    pypsa_df['DateTime'] = pd.to_datetime(pypsa_df['DateTime'])
+
+    sienna_df = pd.read_csv(sienna_dispatch_file)
+    sienna_df['DateTime'] = pd.to_datetime(sienna_df['DateTime'])
+
+    # Filter to solar
+    pypsa_solar = pypsa_df[pypsa_df['carrier'] == pypsa_carrier].copy()
+    sienna_solar = sienna_df[sienna_df['carrier'] == sienna_carrier].copy()
+
+    if pypsa_solar.empty or sienna_solar.empty:
+        print(f"No solar dispatch data found (PyPSA carrier='{pypsa_carrier}', "
+              f"Sienna carrier='{sienna_carrier}')")
+        return
+
+    # Restrict to first N hours
+    pypsa_start = pypsa_solar['DateTime'].min()
+    sienna_start = sienna_solar['DateTime'].min()
+    pypsa_solar = pypsa_solar[pypsa_solar['DateTime'] < pypsa_start + pd.Timedelta(hours=hours)]
+    sienna_solar = sienna_solar[sienna_solar['DateTime'] < sienna_start + pd.Timedelta(hours=hours)]
+
+    # Pivot to wide format: rows = DateTime, columns = generator name
+    pypsa_pivot = pypsa_solar.pivot_table(index='DateTime', columns='name', values='value', aggfunc='sum')
+    sienna_pivot = sienna_solar.pivot_table(index='DateTime', columns='name', values='value', aggfunc='sum')
+
+    # Align columns (generators present in both)
+    common_gens = sorted(set(pypsa_pivot.columns) & set(sienna_pivot.columns))
+    pypsa_only = sorted(set(pypsa_pivot.columns) - set(sienna_pivot.columns))
+    sienna_only = sorted(set(sienna_pivot.columns) - set(pypsa_pivot.columns))
+
+    if pypsa_only:
+        print(f"Generators only in PyPSA ({len(pypsa_only)}): {pypsa_only[:5]}...")
+    if sienna_only:
+        print(f"Generators only in Sienna ({len(sienna_only)}): {sienna_only[:5]}...")
+
+    if not common_gens:
+        print("No common solar generators between PyPSA and Sienna dispatch files.")
+        return
+
+    # Align by position (both have `hours` rows; ignore timestamp format diffs)
+    pypsa_vals = pypsa_pivot[common_gens].values  # shape (T, G)
+    sienna_vals = sienna_pivot[common_gens].values
+    min_T = min(pypsa_vals.shape[0], sienna_vals.shape[0])
+    pypsa_vals = pypsa_vals[:min_T]
+    sienna_vals = sienna_vals[:min_T]
+    time_index = np.arange(min_T)
+
+    # Compute per-generator total absolute difference
+    abs_diff = np.abs(pypsa_vals - sienna_vals)  # (T, G)
+    total_abs_diff = abs_diff.sum(axis=0)  # (G,)
+
+    # Rank generators
+    ranked_indices = np.argsort(total_abs_diff)[::-1]  # descending
+    ranked_gens = [common_gens[i] for i in ranked_indices]
+    ranked_diffs = total_abs_diff[ranked_indices]
+
+    # --- Plot 1: Bar chart of all generators by total abs diff ----------------
+    fig_bar, ax_bar = plt.subplots(figsize=(18, 6))
+    n_show = min(50, len(ranked_gens))
+    ax_bar.bar(range(n_show), ranked_diffs[:n_show], color='coral', edgecolor='darkred', linewidth=0.3)
+    ax_bar.set_xticks(range(n_show))
+    ax_bar.set_xticklabels([ranked_gens[i] for i in range(n_show)], rotation=90, fontsize=6)
+    ax_bar.set_ylabel('Total Absolute Dispatch Difference (MWh)')
+    ax_bar.set_title(f'Solar Generators Ranked by Dispatch Difference (first {hours}h)')
+    ax_bar.axhline(0, color='black', linewidth=0.5)
+    fig_bar.tight_layout()
+    bar_path = output_dir / 'solar_dispatch_diff_ranking.png'
+    fig_bar.savefig(bar_path, dpi=150)
+    plt.close(fig_bar)
+    print(f"Saved ranking plot to {bar_path}")
+
+    # --- Plot 2: Grid of top_n worst generators ------------------------------
+    actual_n = min(top_n, len(ranked_gens))
+    ncols = 4
+    nrows = (actual_n + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 3.5 * nrows), sharex=True)
+    axes_flat = np.array(axes).flatten() if actual_n > 1 else [axes]
+
+    for idx in range(actual_n):
+        ax = axes_flat[idx]
+        gen_name = ranked_gens[idx]
+        gen_col_idx = common_gens.index(gen_name)
+        p_vals = pypsa_vals[:, gen_col_idx]
+        s_vals = sienna_vals[:, gen_col_idx]
+
+        ax.plot(time_index, p_vals, label='PyPSA', color='tab:blue', linewidth=1.2)
+        ax.plot(time_index, s_vals, label='Sienna', color='tab:orange', linewidth=1.2, linestyle='--')
+        ax.fill_between(time_index, p_vals, s_vals, alpha=0.15, color='red')
+
+        diff_mwh = ranked_diffs[idx]
+        ax.set_title(f'{gen_name}\n(diff={diff_mwh:.1f} MWh)', fontsize=8)
+        ax.set_ylabel('MW', fontsize=7)
+        ax.tick_params(labelsize=6)
+        if idx == 0:
+            ax.legend(fontsize=7)
+
+    # Turn off unused subplots
+    for idx in range(actual_n, len(axes_flat)):
+        axes_flat[idx].set_visible(False)
+
+    fig.suptitle(f'Top {actual_n} Solar Generators with Largest Dispatch Difference (first {hours}h)',
+                 fontsize=12, y=1.01)
+    fig.tight_layout()
+    grid_path = output_dir / 'solar_dispatch_per_generator.png'
+    fig.savefig(grid_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f"Saved per-generator plot to {grid_path}")
+
+    # --- Plot 3: Total solar dispatch comparison -----------------------------
+    pypsa_total = pypsa_vals.sum(axis=1)
+    sienna_total = sienna_vals.sum(axis=1)
+
+    fig_tot, ax_tot = plt.subplots(figsize=(12, 5))
+    ax_tot.plot(time_index, pypsa_total, label='PyPSA Total Solar', color='tab:blue', linewidth=1.5)
+    ax_tot.plot(time_index, sienna_total, label='Sienna Total Solar', color='tab:orange', linewidth=1.5, linestyle='--')
+    ax_tot.fill_between(time_index, pypsa_total, sienna_total, alpha=0.15, color='red')
+    ax_tot.set_xlabel('Hour')
+    ax_tot.set_ylabel('MW')
+    ax_tot.set_title(f'Total Solar Dispatch Comparison (first {hours}h)')
+    ax_tot.legend()
+    total_diff = np.abs(pypsa_total - sienna_total).sum()
+    ax_tot.annotate(f'Total abs diff: {total_diff:,.1f} MWh', xy=(0.02, 0.95),
+                    xycoords='axes fraction', fontsize=10, va='top',
+                    bbox=dict(boxstyle='round', fc='lightyellow'))
+    fig_tot.tight_layout()
+    total_path = output_dir / 'solar_dispatch_total_comparison.png'
+    fig_tot.savefig(total_path, dpi=150)
+    plt.close(fig_tot)
+    print(f"Saved total solar comparison to {total_path}")
+
+    # --- Print summary -------------------------------------------------------
+    print(f"\n{'='*70}")
+    print(f"SOLAR DISPATCH COMPARISON SUMMARY (first {hours}h)")
+    print(f"{'='*70}")
+    print(f"Common generators: {len(common_gens)}")
+    print(f"Total abs difference (all gens): {total_diff:,.1f} MWh")
+    print(f"\nTop {min(10, actual_n)} generators by dispatch difference:")
+    for i in range(min(10, actual_n)):
+        gen_col_idx = common_gens.index(ranked_gens[i])
+        p_sum = pypsa_vals[:, gen_col_idx].sum()
+        s_sum = sienna_vals[:, gen_col_idx].sum()
+        print(f"  {i+1:2d}. {ranked_gens[i]:40s}  diff={ranked_diffs[i]:10.1f} MWh  "
+              f"(PyPSA={p_sum:10.1f}, Sienna={s_sum:10.1f})")
+    print(f"{'='*70}")

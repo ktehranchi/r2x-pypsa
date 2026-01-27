@@ -38,8 +38,6 @@ def diagnose_renewable_discrepancy():
             if attr in network.df(component).columns:
                 network.df(component)[attr] = False
     
-    network.loads_t.p_set *= 0.75
-    
     # Get PyPSA renewable generators
     renewable_carriers = ['solar', 'onwind', 'offwind', 'offwind_floating', 'wind', 'hydro', 'ror']
     pypsa_renewables = network.generators[

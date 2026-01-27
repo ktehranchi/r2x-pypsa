@@ -34,6 +34,9 @@ from r2x_pypsa.models.storage_unit import PypsaStorageUnit
 from r2x_pypsa.models.store import PypsaStore
 from r2x_pypsa.models.link import PypsaLink
 from r2x_pypsa.serialization.cost_models import create_operational_cost
+
+# Base power for per-unit conversion (MVA) - must match Sienna's base_power
+BASE_POWER = 100.0
 from r2x_pypsa.serialization.utils import (
     get_pypsa_property,
     convert_to_per_unit,
@@ -48,6 +51,151 @@ from r2x_pypsa.serialization.utils import (
 
 # Global counter for assigning unique object IDs to PyPSA components
 _object_id_counter = {}
+
+
+def _get_or_create_area(psy_system: System, bus_name: str) -> Area:
+    """Get existing area or create new one for a bus."""
+    area_name = f"{bus_name}_area"
+    if not psy_system.list_components_by_name(Area, area_name):
+        area = Area(name=area_name)
+        psy_system.add_component(area)
+        return area
+    return psy_system.get_component(Area, area_name)
+
+
+def detect_link_pairs(pypsa_system: System) -> dict[str, dict]:
+    """Detect paired links based on _fwd/_rev naming convention.
+
+    Returns dict mapping base_name -> {'fwd': link, 'rev': link} or {'standalone': link}
+    """
+    pairs = {}
+    for comp in pypsa_system._component_mgr.iter_all():
+        if not isinstance(comp, PypsaLink):
+            continue
+        name = comp.name
+        if name.endswith('_fwd'):
+            base = name[:-4]
+            pairs.setdefault(base, {})['fwd'] = comp
+        elif name.endswith('_rev'):
+            base = name[:-4]
+            pairs.setdefault(base, {})['rev'] = comp
+        else:
+            pairs.setdefault(name, {})['standalone'] = comp
+    return pairs
+
+
+def _convert_single_link(pypsa_system, psy_system, link, name, swap=False):
+    """Convert a single (unpaired) link to AreaInterchange."""
+    bus0 = get_pypsa_property(pypsa_system, link, "bus0")
+    bus1 = get_pypsa_property(pypsa_system, link, "bus1")
+    if not bus0 or not bus1:
+        logger.warning(f"Link {link.name} missing bus connections")
+        return
+
+    p_nom = get_pypsa_property(pypsa_system, link, "p_nom") or 0.0
+    eff = get_pypsa_property(pypsa_system, link, "efficiency") or 1.0
+
+    # Convert MW to per-unit (Sienna multiplies by base_power when loading)
+    if swap:
+        from_area = _get_or_create_area(psy_system, bus1)
+        to_area = _get_or_create_area(psy_system, bus0)
+        limits = FromTo_ToFrom(
+            from_to=(p_nom * eff) / BASE_POWER,
+            to_from=p_nom / BASE_POWER
+        )
+    else:
+        from_area = _get_or_create_area(psy_system, bus0)
+        to_area = _get_or_create_area(psy_system, bus1)
+        limits = FromTo_ToFrom(
+            from_to=p_nom / BASE_POWER,
+            to_from=(p_nom * eff) / BASE_POWER
+        )
+
+    interchange = AreaInterchange(
+        name=name,
+        active_power_flow=0,
+        from_area=from_area,
+        to_area=to_area,
+        flow_limits=limits,
+    )
+    interchange.services = []
+    psy_system.add_component(interchange)
+
+
+def convert_links_to_area_interchanges(
+    pypsa_system: System,
+    psy_system: System,
+    mapping: dict[str, Any] | None = None,
+) -> set[str]:
+    """Convert PypsaLinks to AreaInterchange, handling paired links.
+
+    Returns set of processed link names to skip in normal conversion.
+    """
+    # Check if lines exist - skip link conversion if so
+    lines_exist = any(
+        isinstance(comp, PypsaLine)
+        for comp in pypsa_system._component_mgr.iter_all()
+    )
+    if lines_exist:
+        logger.info("Lines exist, skipping link-to-AreaInterchange conversion")
+        return set()
+
+    link_pairs = detect_link_pairs(pypsa_system)
+    processed = set()
+    # breakpoint()
+    for base_name, pair in link_pairs.items():
+        if 'fwd' in pair and 'rev' in pair:
+            # PAIRED: Create single AreaInterchange
+            fwd, rev = pair['fwd'], pair['rev']
+            bus0 = get_pypsa_property(pypsa_system, fwd, "bus0")
+            bus1 = get_pypsa_property(pypsa_system, fwd, "bus1")
+
+            from_area = _get_or_create_area(psy_system, bus0)
+            to_area = _get_or_create_area(psy_system, bus1)
+
+            fwd_p_nom = get_pypsa_property(pypsa_system, fwd, "p_nom") or 0.0
+            rev_p_nom = get_pypsa_property(pypsa_system, rev, "p_nom") or 0.0
+
+            # Convert MW to per-unit (Sienna multiplies by base_power when loading)
+            interchange = AreaInterchange(
+                name=base_name,
+                active_power_flow=0,
+                from_area=from_area,
+                to_area=to_area,
+                flow_limits=FromTo_ToFrom(
+                    from_to=fwd_p_nom / BASE_POWER,
+                    to_from=rev_p_nom / BASE_POWER
+                ),
+            )
+            interchange.services = []
+            psy_system.add_component(interchange)
+            processed.update([fwd.name, rev.name])
+            logger.debug(
+                f"Created paired AreaInterchange {base_name} from {fwd.name} and {rev.name}: "
+                f"from_to={fwd_p_nom / BASE_POWER:.4f} pu, to_from={rev_p_nom / BASE_POWER:.4f} pu"
+            )
+
+        elif 'fwd' in pair:
+            # Only fwd: use efficiency for reverse direction
+            link = pair['fwd']
+            _convert_single_link(pypsa_system, psy_system, link, base_name)
+            processed.add(link.name)
+            logger.debug(f"Created AreaInterchange {base_name} from forward-only link {link.name}")
+
+        elif 'rev' in pair:
+            # Only rev: swap direction
+            link = pair['rev']
+            _convert_single_link(pypsa_system, psy_system, link, base_name, swap=True)
+            processed.add(link.name)
+            logger.debug(f"Created AreaInterchange {base_name} from reverse-only link {link.name}")
+
+        else:  # standalone
+            link = pair['standalone']
+            _convert_single_link(pypsa_system, psy_system, link, base_name)
+            processed.add(link.name)
+            logger.debug(f"Created AreaInterchange {base_name} from standalone link {link.name}")
+
+    return processed
 
 
 def create_single_time_series_from_pandas(ts_data, name: str):
@@ -1076,81 +1224,6 @@ def _(
     psy_system: System,
     mapping: dict[str, Any] | None = None,
 ):
-    """Convert a PypsaLink to AreaInterchange objects.
-    
-    Logic: If lines exist, do not create area interchange objects.
-    Else: create with forward and reverse links.
-    """
-    # Check if any lines exist in the system
-    lines_exist = any(
-        isinstance(comp, PypsaLine) 
-        for comp in pypsa_system._component_mgr.iter_all()
-    )
-    
-    if lines_exist:
-        logger.trace(f"Lines exist in system, skipping link {component.name}")
-        return
-    
-    # Get bus connections
-    bus0_name = get_pypsa_property(pypsa_system, component, "bus0")
-    bus1_name = get_pypsa_property(pypsa_system, component, "bus1")
-    
-    if not bus0_name or not bus1_name:
-        logger.warning(f"Link {component.name} missing bus connections")
-        return
-
-    # Create areas for the buses
-    from_area = Area(
-        name=f"{bus0_name}_area",
-    )
-    to_area = Area(
-        name=f"{bus1_name}_area", 
-    )
-
-    # Check if areas already exist
-    if not psy_system.list_components_by_name(Area, from_area.name):
-        psy_system.add_component(from_area)
-    else:
-        from_area = psy_system.get_component(Area, from_area.name)
-
-    if not psy_system.list_components_by_name(Area, to_area.name):
-        psy_system.add_component(to_area)
-    else:
-        to_area = psy_system.get_component(Area, to_area.name)
-
-    # Get link parameters
-    p_nom = get_pypsa_property(pypsa_system, component, "p_nom") or 0.0
-    efficiency = get_pypsa_property(pypsa_system, component, "efficiency") or 1.0
-    
-    if p_nom < 0:
-        logger.warning(f"Link {component.name} has invalid capacity")
-        return
-
-    # Create forward link (bus0 -> bus1)
-    forward_interchange = AreaInterchange(
-        name=f"{component.name}_forward",
-        active_power_flow=0,
-        from_area=from_area,
-        to_area=to_area,
-        flow_limits=FromTo_ToFrom(from_to=p_nom, to_from=p_nom * efficiency),
-    )
-    forward_interchange.services = []
-    psy_system.add_component(forward_interchange)
-
-    # Create reverse link (bus1 -> bus0)
-    reverse_interchange = AreaInterchange(
-        name=f"{component.name}_reverse",
-        active_power_flow=0,
-        from_area=to_area,
-        to_area=from_area,
-        flow_limits=FromTo_ToFrom(from_to=p_nom * efficiency, to_from=p_nom),
-    )
-    reverse_interchange.services = []
-    psy_system.add_component(reverse_interchange)
-
-    # NOTE: We do NOT add time series to AreaInterchange components from Links
-    # PowerSimulations requires ALL AreaInterchange components to have time series if ANY do,
-    # and the time series must be named "from_to_flow_limit" and "to_from_flow_limit"
-    # Since PyPSA links typically have static capacities, we use static flow limits instead
-    # This avoids the error: "No devices with time series from_to_flow_limit found"
-    # Static flow limits are handled automatically by PowerSimulations when no time series exist
+    """Links are processed in batch by convert_links_to_area_interchanges()."""
+    logger.trace(f"Skipping link {component.name} - processed in batch")
+    return

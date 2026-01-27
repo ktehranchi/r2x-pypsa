@@ -286,7 +286,13 @@ def get_ts_or_static(network, table: str, column: str, name: str, ts_data: Any, 
     """
     # If time series data is available and not empty
     if ts_data is not None and not ts_data.empty and name in ts_data.columns:
-        return PypsaProperty.create_with_time_series(ts_data[name], units=None)
+        series = ts_data[name]
+        # If the series is constant, return a static property to avoid
+        # floating-point drift from mean() on constant data (e.g. efficiency=1.0
+        # becoming 1.0000000000000002 which fails le=1 validation).
+        if series.nunique() <= 1:
+            return PypsaProperty.create(value=float(series.iloc[0]))
+        return PypsaProperty.create_with_time_series(series, units=None)
     
     # Otherwise use static data or default
     value = static_data if static_data is not None else default

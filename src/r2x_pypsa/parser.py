@@ -137,7 +137,7 @@ class PypsaParser(BaseParser):
         p_set_t = self.network.get_switchable_as_dense('Generator', 'p_set')
         marginal_cost_t = self.network.get_switchable_as_dense('Generator', 'marginal_cost')
         marginal_cost_quadratic_t = self.network.get_switchable_as_dense('Generator', 'marginal_cost_quadratic')
-        efficiency_t = self.network.get_switchable_as_dense('Generator', 'efficiency')
+        efficiency_t = self.network.get_switchable_as_dense('Generator', 'efficiency').round(4)
         stand_by_cost_t = self.network.get_switchable_as_dense('Generator', 'stand_by_cost')
         
         # NaN default attributes (may not exist)
@@ -200,7 +200,7 @@ class PypsaParser(BaseParser):
 
                 # Add generator to system
                 system.add_component(generator)
-                logger.debug(f"Added generator {gen_name} with carrier {gen_data.get('carrier', 'unknown')}")
+                logger.trace(f"Added generator {gen_name} with carrier {gen_data.get('carrier', 'unknown')}")
                 
             except Exception as e:
                 carrier = gen_data.get('carrier', 'unknown')
@@ -232,8 +232,8 @@ class PypsaParser(BaseParser):
         marginal_cost_t = self.network.get_switchable_as_dense('StorageUnit', 'marginal_cost')
         marginal_cost_quadratic_t = self.network.get_switchable_as_dense('StorageUnit', 'marginal_cost_quadratic')
         marginal_cost_storage_t = self.network.get_switchable_as_dense('StorageUnit', 'marginal_cost_storage')
-        efficiency_store_t = self.network.get_switchable_as_dense('StorageUnit', 'efficiency_store')
-        efficiency_dispatch_t = self.network.get_switchable_as_dense('StorageUnit', 'efficiency_dispatch')
+        efficiency_store_t = self.network.get_switchable_as_dense('StorageUnit', 'efficiency_store').round(4)
+        efficiency_dispatch_t = self.network.get_switchable_as_dense('StorageUnit', 'efficiency_dispatch').round(4)
         standing_loss_t = self.network.get_switchable_as_dense('StorageUnit', 'standing_loss')
         inflow_t = self.network.get_switchable_as_dense('StorageUnit', 'inflow')
         
@@ -292,7 +292,7 @@ class PypsaParser(BaseParser):
                 
                 # Add storage unit to system
                 system.add_component(storage_unit)
-                logger.debug(f"Added storage unit {storage_name} with carrier {storage_data.get('carrier', 'unknown')}")
+                logger.trace(f"Added storage unit {storage_name} with carrier {storage_data.get('carrier', 'unknown')}")
                 
             except Exception as e:
                 logger.warning(f"Failed to process storage unit {storage_name}: {e}")
@@ -310,7 +310,7 @@ class PypsaParser(BaseParser):
         nan_default_attrs = {'ramp_limit_up', 'ramp_limit_down'}
         
         # Normal attributes (always exist)
-        efficiency_t = self.network.get_switchable_as_dense('Link', 'efficiency')
+        efficiency_t = self.network.get_switchable_as_dense('Link', 'efficiency').round(4)
         p_min_pu_t = self.network.get_switchable_as_dense('Link', 'p_min_pu')
         p_max_pu_t = self.network.get_switchable_as_dense('Link', 'p_max_pu')
         marginal_cost_t = self.network.get_switchable_as_dense('Link', 'marginal_cost')

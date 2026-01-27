@@ -34,8 +34,6 @@ def compare_time_series_values():
             if attr in network.df(component).columns:
                 network.df(component)[attr] = False
     
-    network.loads_t.p_set *= 0.75
-    
     # Get renewable generators
     renewable_carriers = ['solar', 'onwind', 'offwind', 'offwind_floating', 'wind', 'hydro', 'ror']
     pypsa_renewables = network.generators[

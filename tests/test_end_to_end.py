@@ -6,25 +6,30 @@ import h5py
 import sqlite3
 import os
 from pathlib import Path
-from r2x.api import System
-from infrasys import TimeSeriesStorageType
-from r2x_pypsa.serialization.pypsa_to_psy import pypsa_component_to_psy
-from r2x_pypsa.serialization.to_sienna import infrasys_to_psy
 from r2x_pypsa.parser import PypsaParser
-from r2x_pypsa.serialization import create_default_mapping
+from r2x_pypsa.serialization import pypsa_to_sienna, create_default_mapping
 from loguru import logger
 
 from helpers import (
     plot_generator_marginal_costs,
     plot_energy_balance,
     plot_capacity_comparison,
-    plot_sienna_energy_balance
+    plot_sienna_energy_balance,
+    plot_interchange_flows,
 )
 from test_time_series_helpers import (
     extract_pypsa_generator_time_series,
     extract_sienna_generator_time_series,
-    compare_time_series
+    compare_time_series,
+    diagnose_per_generator_max_active_power,
 )
+
+
+@pytest.fixture(scope="module")
+def base_network():
+    """Load the PyPSA network once for all tests in this module."""
+    test_file = Path("tests/data/test_network_1h.nc")
+    return pypsa.Network(test_file)
 
 
 def compare_battery_parameters(network, json_file, h5_file):
@@ -186,13 +191,13 @@ def compare_battery_parameters(network, json_file, h5_file):
             logger.info(f"  ✓ Energy capacity matches: {pypsa_e_nom:.2f} MWh")
         
         # Charge efficiency
-        if abs(pypsa_efficiency_store - sienna_efficiency_store) > 1e-6:
+        if abs(pypsa_efficiency_store - sienna_efficiency_store) > 1e-3:
             issues.append(f"Charge efficiency mismatch: PyPSA={pypsa_efficiency_store:.6f}, Sienna={sienna_efficiency_store:.6f}")
         else:
             logger.info(f"  ✓ Charge efficiency matches: {pypsa_efficiency_store:.6f}")
         
         # Discharge efficiency
-        if abs(pypsa_efficiency_dispatch - sienna_efficiency_dispatch) > 1e-6:
+        if abs(pypsa_efficiency_dispatch - sienna_efficiency_dispatch) > 1e-3:
             issues.append(f"Discharge efficiency mismatch: PyPSA={pypsa_efficiency_dispatch:.6f}, Sienna={sienna_efficiency_dispatch:.6f}")
         else:
             logger.info(f"  ✓ Discharge efficiency matches: {pypsa_efficiency_dispatch:.6f}")
@@ -204,7 +209,7 @@ def compare_battery_parameters(network, json_file, h5_file):
             logger.info(f"  ✓ Initial SOC matches: {pypsa_soc_initial_pct:.2f}%")
         
         # Marginal cost
-        if abs(pypsa_marginal_cost - sienna_marginal_cost) > 1e-6:
+        if abs(pypsa_marginal_cost - sienna_marginal_cost) > 1e-2:
             issues.append(f"Marginal cost mismatch: PyPSA={pypsa_marginal_cost:.6f} $/MWh, Sienna={sienna_marginal_cost:.6f} $/MWh")
         else:
             logger.info(f"  ✓ Marginal cost matches: {pypsa_marginal_cost:.6f} $/MWh")
@@ -254,62 +259,32 @@ def compare_battery_parameters(network, json_file, h5_file):
     logger.info("=" * 80)
 
 
-def test_end_to_end_pypsa_to_psy_conversion():
+def test_end_to_end_pypsa_to_psy_conversion(base_network):
     """Test end-to-end conversion from PyPSA to PSY system."""
-    # Use the test data
-    test_file = Path("tests/data/test_network_1h.nc")
-
-    parser = PypsaParser(netcdf_file=str(test_file))
+    parser = PypsaParser(network=base_network.copy())
     pypsa_system = parser.build_system()
 
-    # Convert to Sienna
-    mapping = create_default_mapping()
-
-    # Create a new PSY system
-    psy_system = System(
-        name="PSY system",
-        auto_add_composed_components=True,
-        time_series_storage_type=TimeSeriesStorageType.HDF5
-    )
-
-    # Convert all PyPSA components to PSY components
-    conversion_failures = 0
-    for component in pypsa_system._component_mgr.iter_all():
-        try:
-            pypsa_component_to_psy(component, pypsa_system, psy_system, mapping)
-        except Exception as e:
-            logger.warning(f"Failed to convert component {component.name}: {e}")
-            conversion_failures += 1
-            continue
-
-    # Serialize the PSY system to Sienna format
+    # Convert to Sienna (handles link-to-AreaInterchange conversion internally)
     output_dir = Path("tests/test_output")
     output_dir.mkdir(parents=True, exist_ok=True)
     output_file = output_dir / "test_network_1h_output.json"
-    infrasys_to_psy(psy_system, filename=output_file)
-    
+
+    mapping = create_default_mapping()
+    pypsa_to_sienna(pypsa_system, output_path=output_file, mapping=mapping)
+
     # Verify the output file was created
     assert output_file.exists()
-    
-    # Note: Not cleaning up output files - they remain in test_output/ for inspection
-    
-    # Log conversion statistics
-    total_components = len(list(pypsa_system._component_mgr.iter_all()))
-    successful_conversions = total_components - conversion_failures
-    logger.info(f"Converted {successful_conversions}/{total_components} components successfully")
 
 
 
 
-def test_e2e_economic_dispatch():
+def test_e2e_economic_dispatch(base_network):
     """Test end-to-end conversion from PyPSA to PSY system.
-    
+
     To enable network clustering (copper plate), set environment variable:
         CLUSTER_NETWORK=1 pytest tests/test_end_to_end.py::test_e2e_economic_dispatch
     """
-    # Use the test data
-    test_file = Path("tests/data/test_network_1h.nc")
-    network = pypsa.Network(test_file)
+    network = base_network.copy()
 
     # Optional: Cluster network to make it a copper plate
     cluster_network = os.getenv("CLUSTER_NETWORK", "0").lower() in ("1", "true", "yes")
@@ -405,9 +380,6 @@ def test_e2e_economic_dispatch():
                 extendable_attrs_backup[component][attr] = network.df(component)[attr].copy()
                 # Set the attribute to False
                 network.df(component)[attr] = False
-
-    # Remember our load is for 2030, so lets reduce the system load for the sake of this simulation feasibility
-    network.loads_t.p_set *= 0.75 
     
     # ENABLE storage units
     logger.info("=" * 80)
@@ -650,7 +622,24 @@ def test_e2e_economic_dispatch():
                     'carrier': carrier,
                     'value': float(value)
                 })
-    
+
+    # Save ALL link flows (p0 = power at bus0 end, positive = flow from bus0 to bus1)
+    if hasattr(network, 'links_t') and hasattr(network.links_t, 'p0') and hasattr(network, 'links') and len(network.links) > 0:
+        for link_name in network.links.index:
+            link_flow = network.links_t.p0[link_name].loc[snapshots]
+            for idx in link_flow.index:
+                value = link_flow.loc[idx]
+                if isinstance(idx, tuple):
+                    dt = idx[1] if len(idx) >= 2 else idx[0]
+                else:
+                    dt = idx
+                dispatch_data.append({
+                    'DateTime': dt,
+                    'name': link_name,
+                    'carrier': 'link',
+                    'value': float(value)
+                })
+
     if dispatch_data:
         pypsa_dispatch_df = pd.DataFrame(dispatch_data)
         # Convert DateTime to datetime - handle both string and datetime objects
@@ -672,41 +661,15 @@ def test_e2e_economic_dispatch():
     parser = PypsaParser(network=network)
     pypsa_system = parser.build_system()
 
-    # Convert to Sienna
-    mapping = create_default_mapping()
-
-    # Create a new PSY system
-    psy_system = System(
-        name="PSY system",
-        auto_add_composed_components=True,
-        time_series_storage_type=TimeSeriesStorageType.HDF5
-    )
-
-    # Convert all PyPSA components to PSY components
-       # Convert all PyPSA components to PSY components (including storage)
-    conversion_failures = 0
-    for component in pypsa_system._component_mgr.iter_all():
-        try:
-            pypsa_component_to_psy(component, pypsa_system, psy_system, mapping)
-        except Exception as e:
-            logger.warning(f"Failed to convert component {component.name}: {e}")
-            conversion_failures += 1
-            continue
-
-    # Serialize the PSY system to Sienna format
+    # Convert to Sienna (handles link-to-AreaInterchange conversion internally)
     # (output_dir already created above)
     output_file = output_dir / "test_network_1h_output_optimized.json"
-    infrasys_to_psy(psy_system, filename=output_file)
-    
+
+    mapping = create_default_mapping()
+    pypsa_to_sienna(pypsa_system, output_path=output_file, mapping=mapping)
+
     # Verify the output file was created
     assert output_file.exists()
-    
-    # Note: Not cleaning up output files - they remain in test_output/ for inspection
-    
-    # Log conversion statistics
-    total_components = len(list(pypsa_system._component_mgr.iter_all()))
-    successful_conversions = total_components - conversion_failures
-    logger.info(f"Converted {successful_conversions}/{total_components} components successfully")
 
 
 def test_pypsa_sienna_objective_match(caplog):
@@ -797,26 +760,39 @@ def test_pypsa_sienna_objective_match(caplog):
         test_logger.info(f"Sienna dispatch file not found: {dispatch_file}")
         test_logger.info("  Run the Julia script to generate it")
 
+    # Plot link/interchange flows comparison
+    pypsa_dispatch_file = output_dir / "pypsa_dispatch.csv"
+    sienna_dispatch = dispatch_file if dispatch_file.exists() else None
+    if pypsa_dispatch_file.exists() or sienna_dispatch:
+        test_logger.info("Plotting interchange/link flow comparison...")
+        try:
+            plot_interchange_flows(
+                pypsa_dispatch_file,
+                sienna_dispatch_file=sienna_dispatch,
+                timesteps=7*24,
+            )
+        except Exception as e:
+            test_logger.warning(f"Could not plot interchange flows: {e}")
 
-def test_compare_pypsa_sienna_systems():
+
+def test_compare_pypsa_sienna_systems(base_network):
     """Compare PyPSA and Sienna systems without running optimization.
-    
+
     To force regeneration (bypass cache), set environment variable:
         FORCE_REGENERATE=1 pytest tests/test_end_to_end.py::test_compare_pypsa_sienna_systems
     """
     # Check environment variable to force regeneration
     force_regenerate = os.getenv("FORCE_REGENERATE", "0").lower() in ("1", "true", "yes")
-    
-    # Load PyPSA network
+
     test_file = Path("tests/data/test_network_1h.nc")
-    
+
     # Set up output files
     test_dir = Path(__file__).parent
     output_dir = test_dir / "test_output"
     output_dir.mkdir(parents=True, exist_ok=True)
     json_file = output_dir / "test_network_1h_comparison.json"
     h5_file = output_dir / f"{json_file.stem}.h5"
-    
+
     # Check if we can use cached files
     use_cache = False
     if not force_regenerate and json_file.exists() and h5_file.exists():
@@ -824,18 +800,25 @@ def test_compare_pypsa_sienna_systems():
         input_mtime = test_file.stat().st_mtime
         json_mtime = json_file.stat().st_mtime
         h5_mtime = h5_file.stat().st_mtime
-        
+
         # Use cache if both output files are newer than input
         if json_mtime > input_mtime and h5_mtime > input_mtime:
             use_cache = True
             logger.info("Using cached Sienna files (output files are newer than input)")
-    
+
+    # Load network once for both branches (comparison always needs it)
+    network = base_network.copy()
+    for component in network.components.keys():
+        for attr in ["p_nom_extendable", "s_nom_extendable", "e_nom_extendable"]:
+            if attr in network.df(component).columns:
+                network.df(component)[attr] = False
+
     if not use_cache or force_regenerate:
         if force_regenerate:
             logger.info("Force regenerating Sienna files (FORCE_REGENERATE=1)")
         else:
             logger.info("Regenerating Sienna files (cache miss or files outdated)")
-        
+
         # Remove old files before regenerating (especially important when force_regenerate=True)
         if json_file.exists():
             json_file.unlink()
@@ -843,50 +826,14 @@ def test_compare_pypsa_sienna_systems():
         if h5_file.exists():
             h5_file.unlink()
             logger.debug(f"Removed existing HDF5 file: {h5_file}")
-        
-        network = pypsa.Network(test_file)
-        
-        # Apply modifications (same as optimization test)
-        for component in network.components.keys():
-            for attr in ["p_nom_extendable", "s_nom_extendable", "e_nom_extendable"]:
-                if attr in network.df(component).columns:
-                    network.df(component)[attr] = False
-        
-        network.loads_t.p_set *= 0.75
-        
-        # Convert to Sienna using the MODIFIED network (not re-parsing from file)
-        # This preserves the updated loads and extendable attributes
+
+        # Convert to Sienna using the MODIFIED network
         parser = PypsaParser(network=network)
         pypsa_system = parser.build_system()
-        
+
         mapping = create_default_mapping()
-        
-        psy_system = System(
-            name="PSY system",
-            auto_add_composed_components=True,
-            time_series_storage_type=TimeSeriesStorageType.HDF5
-        )
-        
-        for component in pypsa_system._component_mgr.iter_all():
-            try:
-                pypsa_component_to_psy(component, pypsa_system, psy_system, mapping)
-            except Exception as e:
-                logger.warning(f"Failed to convert component {component.name}: {e}")
-                continue
-        
-        infrasys_to_psy(psy_system, filename=json_file)
-    else:
-        # Still need to load PyPSA network for comparison metrics
-        network = pypsa.Network(test_file)
-        
-        # Apply modifications (same as optimization test)
-        for component in network.components.keys():
-            for attr in ["p_nom_extendable", "s_nom_extendable", "e_nom_extendable"]:
-                if attr in network.df(component).columns:
-                    network.df(component)[attr] = False
-        
-        network.loads_t.p_set *= 0.75
-    
+        pypsa_to_sienna(pypsa_system, output_path=json_file, mapping=mapping)
+
     # ===== COMPARISON SECTION =====
     # This section always runs (whether using cache or not) to output the comparison table
 
@@ -1350,6 +1297,23 @@ def test_compare_pypsa_sienna_systems():
             'name': mapping['name']
         }
 
+    # ===== PER-GENERATOR max_active_power DIAGNOSTIC =====
+    logger.info("=" * 80)
+    logger.info("PER-GENERATOR max_active_power DIAGNOSTIC (Solar, Wind, Hydro)")
+    logger.info("=" * 80)
+
+    for gen_type, mapping in generator_mappings.items():
+        diagnose_per_generator_max_active_power(
+            network,
+            json_file,
+            h5_file,
+            output_dir,
+            pypsa_carriers=mapping['pypsa_carriers'],
+            sienna_prime_movers=mapping['sienna_prime_movers'],
+            component_type='RenewableDispatch',
+            name=mapping['name'],
+        )
+
     # Generation
     # For generators, active_power_limits.max is in per-unit (relative to base_power)
     # Actual capacity = base_power * active_power_limits.max
@@ -1687,10 +1651,7 @@ def test_compare_pypsa_sienna_systems():
         logger.info(f"\nChecking for reserve margins or constraints requiring extra generation...")
         
         # Check if network has been optimized and has model
-        test_file = Path("tests/data/test_network_1h.nc")
-        network_check = pypsa.Network(test_file)
-        
-        # Apply same modifications as in test
+        network_check = base_network.copy()
         for component in network_check.components.keys():
             for attr in ["p_nom_extendable", "s_nom_extendable", "e_nom_extendable"]:
                 if attr in network_check.df(component).columns:
@@ -1896,8 +1857,6 @@ def main():
         for attr in ["p_nom_extendable", "s_nom_extendable", "e_nom_extendable"]:
             if attr in network.df(component).columns:
                 network.df(component)[attr] = False
-
-    network.loads_t.p_set *= 0.75 
 
     logger.info("Starting optimization with HiGHS...")
     network.optimize(

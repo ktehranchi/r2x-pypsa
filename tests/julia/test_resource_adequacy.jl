@@ -478,6 +478,111 @@ function export_generator_info(pras_sys; save_path=nothing)
     return df
 end
 
+
+
+
+function add_dummy_lines_for_area_interchanges!(sys)
+    """
+    For each AreaInterchange, create a dummy Line connecting a bus from each area.
+    This is a workaround for SiennaPRASInterface requiring Lines to exist for each interface.
+    """
+    area_interchanges = collect(get_components(AreaInterchange, sys))
+    
+    if isempty(area_interchanges)
+        return
+    end
+    
+    # Build a mapping of area name -> list of buses in that area
+    buses = collect(get_components(Bus, sys))
+    area_to_buses = Dict{String, Vector{Bus}}()
+    for bus in buses
+        area = get_area(bus)
+        if area !== nothing
+            area_name = get_name(area)
+            if !haskey(area_to_buses, area_name)
+                area_to_buses[area_name] = Bus[]
+            end
+            push!(area_to_buses[area_name], bus)
+        end
+    end
+    
+    # Check which area pairs already have lines
+    existing_lines = collect(get_components(Line, sys))
+    existing_area_pairs = Set{Tuple{String, String}}()
+    for line in existing_lines
+        arc = get_arc(line)
+        from_area = get_area(get_from(arc))
+        to_area = get_area(get_to(arc))
+        if from_area !== nothing && to_area !== nothing
+            from_name = get_name(from_area)
+            to_name = get_name(to_area)
+            if from_name != to_name
+                push!(existing_area_pairs, (from_name, to_name))
+                push!(existing_area_pairs, (to_name, from_name))  # Both directions
+            end
+        end
+    end
+    
+    # Create dummy lines for AreaInterchanges without existing lines
+    for ai in area_interchanges
+        from_area = get_from_area(ai)
+        to_area = get_to_area(ai)
+        from_area_name = get_name(from_area)
+        to_area_name = get_name(to_area)
+        
+        # Skip if line already exists for this area pair
+        if (from_area_name, to_area_name) in existing_area_pairs
+            println("  Line already exists for $(from_area_name) <-> $(to_area_name)")
+            continue
+        end
+        
+        # Get a bus from each area
+        if !haskey(area_to_buses, from_area_name) || isempty(area_to_buses[from_area_name])
+            @warn "No buses found in area $from_area_name for AreaInterchange $(get_name(ai))"
+            continue
+        end
+        if !haskey(area_to_buses, to_area_name) || isempty(area_to_buses[to_area_name])
+            @warn "No buses found in area $to_area_name for AreaInterchange $(get_name(ai))"
+            continue
+        end
+        
+        from_bus = first(area_to_buses[from_area_name])
+        to_bus = first(area_to_buses[to_area_name])
+        
+        # Get flow limits from AreaInterchange
+        flow_limits = get_flow_limits(ai)
+        rating = max(flow_limits.from_to, flow_limits.to_from)
+        if rating <= 0
+            rating = 9999.0  # Large default if no limit specified
+        end
+        
+        # Create dummy line
+        dummy_line_name = "dummy_line_$(from_area_name)_$(to_area_name)"
+        arc = Arc(; from=from_bus, to=to_bus)
+        
+        dummy_line = Line(;
+            name=dummy_line_name,
+            available=true,
+            active_power_flow=0.0,
+            reactive_power_flow=0.0,
+            arc=arc,
+            r=0.0001,  # Small resistance
+            x=0.001,   # Small reactance  
+            b=(from=0.0, to=0.0),
+            rating=rating,
+            angle_limits=(min=-π/2, max=π/2),
+        )
+        
+        add_component!(sys, dummy_line)
+        println("  Created dummy line: $dummy_line_name (rating: $rating MW)")
+        
+        # Mark this pair as having a line now
+        push!(existing_area_pairs, (from_area_name, to_area_name))
+        push!(existing_area_pairs, (to_area_name, from_area_name))
+    end
+end
+
+
 function run_resource_adequacy_test()
     """Main test function for resource adequacy analysis."""
 
@@ -512,6 +617,10 @@ function run_resource_adequacy_test()
         println("  Frequency: $(get_frequency(sys)) Hz")
         println("  Base Power: $(get_base_power(sys)) MVA")
 
+        add_dummy_lines_for_area_interchanges!(sys)
+        println("  Added dummy lines for area interchanges")
+
+
         # Count components
         thermal_gens = collect(get_components(ThermalStandard, sys))
         hydro_gens = collect(get_components(HydroDispatch, sys))
@@ -520,6 +629,7 @@ function run_resource_adequacy_test()
         loads = collect(get_components(PowerLoad, sys))
         lines = collect(get_components(Line, sys))
         areas = collect(get_components(Area, sys))
+        area_interchanges = collect(get_components(AreaInterchange, sys))
 
         println("\nComponent Counts:")
         println("  Thermal Generators: $(length(thermal_gens))")
@@ -529,7 +639,7 @@ function run_resource_adequacy_test()
         println("  Loads: $(length(loads))")
         println("  Lines: $(length(lines))")
         println("  Areas: $(length(areas))")
-
+        println("  Area Interchanges: $(length(area_interchanges))")
         # Build PRAS system
         println("\n" * "-" ^ 50)
         println("Building PRAS System")
@@ -557,16 +667,15 @@ function run_resource_adequacy_test()
                 PowerSystems.PowerLoad,
                 StaticLoadPRAS(max_active_power="max_active_power"),
             ),
+            DeviceRAModel(
+                PowerSystems.AreaInterchange,
+                AreaInterchangeLimit(),
+            ),
+            DeviceRAModel(
+                PowerSystems.Line,
+                LinePRAS(),
+            ),
         ]
-
-        # Only add Line and AreaInterchange models if lines exist
-        if length(lines) > 0
-            push!(device_models, DeviceRAModel(PowerSystems.Line, LinePRAS()))
-            push!(device_models, DeviceRAModel(PowerSystems.AreaInterchange, AreaInterchangeLimit()))
-            println("  Including Line and AreaInterchange models ($(length(lines)) lines found)")
-        else
-            println("  Skipping Line/AreaInterchange models (no lines in system)")
-        end
 
         # Define the RA problem template
         problem_template = RATemplate(PowerSystems.Area, device_models)
@@ -593,7 +702,7 @@ function run_resource_adequacy_test()
         println("-" ^ 50)
 
         # Use more samples for better statistics
-        n_samples = 50
+        n_samples = 500
         method = SequentialMonteCarlo(
             samples=n_samples,
             seed=42,

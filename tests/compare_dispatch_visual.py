@@ -703,9 +703,9 @@ def order_carriers_by_marginal_cost(carriers):
         'onwind': 1,
         'offwind': 1,
         'wind': 1,  # Alias for onwind
-        'hydro': 1.5,
+        'hydro': 0.01,
         # Nuclear - very low cost, after renewables
-        'nuclear': 2,
+        'nuclear': 0.0,
         # Batteries - after renewables but before thermal
         'battery': 3,
         'pumped_hydro': 3,
@@ -753,17 +753,18 @@ def plot_side_by_side_energy_balance(pypsa_df, sienna_df, carrier_colors, timest
     load_carriers = {'load', 'AC', 'loads', 'demand'}
 
     # Carriers to exclude from dispatch plots (not actual generation)
-    exclude_carriers = {'interchange'}  # Transfer between regions, not generation
+    exclude_carriers = {'interchange','link'}  # Transfer between regions, not generation
     
     # Debug: log unique carriers to see what we have
     logger.debug(f"PyPSA unique carriers (after mapping): {sorted(pypsa_df_mapped['carrier'].unique())}")
     logger.debug(f"Sienna unique carriers (after mapping): {sorted(sienna_df_mapped['carrier'].unique())}")
     
-    # Separate load from generators for PyPSA
+    # Separate load from generators for PyPSA (also exclude link flows)
     pypsa_load_mask = pypsa_df_mapped['carrier'].str.upper().isin([c.upper() for c in load_carriers])
-    pypsa_generators_df = pypsa_df_mapped[~pypsa_load_mask].copy()
+    pypsa_exclude_mask = pypsa_df_mapped['carrier'].str.lower().isin([c.lower() for c in exclude_carriers])
+    pypsa_generators_df = pypsa_df_mapped[~pypsa_load_mask & ~pypsa_exclude_mask].copy()
     pypsa_load_df = pypsa_df_mapped[pypsa_load_mask].copy()
-    
+
     # Separate load from generators for Sienna (also exclude interchange)
     sienna_load_mask = sienna_df_mapped['carrier'].str.upper().isin([c.upper() for c in load_carriers])
     sienna_exclude_mask = sienna_df_mapped['carrier'].str.lower().isin([c.lower() for c in exclude_carriers])

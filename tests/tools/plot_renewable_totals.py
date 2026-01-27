@@ -293,10 +293,6 @@ def check_total_generation_vs_load(pypsa_df, sienna_df, start_datetime, end_date
                 if attr in df.columns:
                     df[attr] = False
     
-    # Scale load by 0.75 (as in test)
-    if hasattr(network, 'loads_t') and hasattr(network.loads_t, 'p_set'):
-        network.loads_t.p_set *= 0.75
-    
     # Disable storage (as in test)
     if hasattr(network, 'storage_units') and len(network.storage_units) > 0:
         network.storage_units['active'] = False

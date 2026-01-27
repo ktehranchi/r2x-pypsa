@@ -459,8 +459,6 @@ def compare_constraints_for_hour():
             if attr in network.df(component).columns:
                 network.df(component)[attr] = False
     
-    network.loads_t.p_set *= 0.75
-    
     # Optimize if needed
     if not hasattr(network, 'model') or network.model is None:
         logger.info("Optimizing PyPSA network...")

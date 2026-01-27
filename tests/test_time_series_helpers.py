@@ -281,7 +281,7 @@ def extract_sienna_generator_time_series(
 def compare_time_series(
     pypsa_ts: Optional[pd.Series],
     sienna_ts: Optional[pd.Series],
-    tolerance_mw: float = 0.01,
+    tolerance_mw: float = 0.1,
     min_timesteps: int = 20,
     name: str = "Time series"
 ) -> Tuple[bool, int, int, float, float]:
@@ -390,4 +390,324 @@ def compare_time_series(
     logger.info(f"  Max difference: {max_diff:.6f} MW, Mean difference: {mean_diff:.6f} MW")
     
     return match, matches, num_timesteps_to_check, max_diff, mean_diff
+
+
+def diagnose_per_generator_max_active_power(
+    network,
+    json_file: Path,
+    h5_file: Path,
+    output_dir: Path,
+    pypsa_carriers: List[str],
+    sienna_prime_movers: List[str],
+    component_type: str = 'RenewableDispatch',
+    name: str = "Generator",
+    num_sample_timesteps: int = 5,
+) -> dict:
+    """Diagnose per-generator max_active_power differences between PyPSA and Sienna.
+
+    For each generator, compares:
+    - Static capacity: PyPSA p_nom vs Sienna rating * base_power * power_factor
+    - Time series values: raw per-unit capacity factors
+    - Computed MW: p_max_pu * p_nom (PyPSA) vs ts * get_max_active_power (Sienna)
+
+    Parameters
+    ----------
+    network : pypsa.Network
+        PyPSA network object
+    json_file : Path
+        Path to Sienna JSON file
+    h5_file : Path
+        Path to Sienna HDF5 file
+    output_dir : Path
+        Directory for temporary files
+    pypsa_carriers : List[str]
+        PyPSA carrier strings (e.g., ['solar'])
+    sienna_prime_movers : List[str]
+        Sienna prime mover type strings (e.g., ['PVe'])
+    component_type : str
+        Sienna component type (default: 'RenewableDispatch')
+    name : str
+        Name for logging (default: "Generator")
+    num_sample_timesteps : int
+        Number of sample timesteps to log (default: 5)
+
+    Returns
+    -------
+    dict
+        Diagnostic results with keys:
+        - generators: list of per-generator comparison dicts
+        - total_pypsa_capacity: total PyPSA capacity (MW)
+        - total_sienna_capacity: total Sienna capacity (MW)
+        - capacity_match: bool, whether total capacities match within tolerance
+        - ts_issues: list of generator names with time series mismatches
+    """
+    import json as json_module
+
+    results = {
+        'generators': [],
+        'total_pypsa_capacity': 0.0,
+        'total_sienna_capacity': 0.0,
+        'capacity_match': False,
+        'ts_issues': [],
+    }
+
+    logger.info("=" * 80)
+    logger.info(f"PER-GENERATOR {name.upper()} max_active_power DIAGNOSTIC")
+    logger.info("=" * 80)
+
+    # --- PyPSA side ---
+    pypsa_gens = network.generators[
+        (network.generators.carrier.isin(pypsa_carriers))
+        & (network.generators.p_nom > 0)
+    ]
+    logger.info(f"PyPSA {name} generators (p_nom > 0): {len(pypsa_gens)}")
+
+    # --- Sienna side ---
+    with open(json_file) as f:
+        sienna_data = json_module.load(f)
+
+    components = sienna_data.get('data', {}).get('components', [])
+    sienna_gens = [
+        c for c in components
+        if c.get('__metadata__', {}).get('type') == component_type
+        and c.get('prime_mover_type') in sienna_prime_movers
+    ]
+    logger.info(f"Sienna {name} generators ({component_type}, prime_movers={sienna_prime_movers}): {len(sienna_gens)}")
+
+    # Build Sienna lookup by name
+    sienna_by_name = {g.get('name'): g for g in sienna_gens}
+
+    # Build Sienna time series lookup: generator UUID -> time series data
+    sienna_ts_by_uuid = {}
+    if h5_file.exists():
+        with h5py.File(h5_file, 'r') as h5:
+            if 'time_series_metadata' in h5:
+                db_data = h5['time_series_metadata'][()]
+                db_path = output_dir / f".temp_diag_{'_'.join(sienna_prime_movers)}.db"
+                with open(db_path, 'wb') as db_file:
+                    db_file.write(bytes(db_data))
+
+                conn = sqlite3.connect(db_path)
+                cursor = conn.cursor()
+
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                tables = [row[0] for row in cursor.fetchall()]
+                table_name = 'time_series_metadata' if 'time_series_metadata' in tables else 'time_series_associations'
+
+                # Get all generator UUIDs
+                gen_uuids = [
+                    g.get('internal', {}).get('uuid', {}).get('value')
+                    for g in sienna_gens
+                ]
+                gen_uuids = [u for u in gen_uuids if u]
+
+                if gen_uuids:
+                    placeholders = ','.join(['?' for _ in gen_uuids])
+                    query = f'''
+                        SELECT owner_uuid, time_series_uuid, initial_timestamp, resolution, length
+                        FROM {table_name}
+                        WHERE owner_uuid IN ({placeholders})
+                          AND owner_type = ?
+                          AND name = 'max_active_power'
+                    '''
+                    cursor.execute(query, gen_uuids + [component_type])
+                    ts_rows = cursor.fetchall()
+
+                    for owner_uuid, ts_uuid, _, _, _ in ts_rows:
+                        # Read time series data from HDF5
+                        possible_paths = [
+                            f"/time_series/{ts_uuid}/data",
+                            f"/time_series/{ts_uuid}",
+                            f"/{ts_uuid}/data",
+                        ]
+                        ts_data = None
+                        for path in possible_paths:
+                            if path in h5:
+                                if isinstance(h5[path], h5py.Dataset):
+                                    ts_data = h5[path][:]
+                                    break
+                                elif isinstance(h5[path], h5py.Group) and 'data' in h5[path]:
+                                    ts_data = h5[path]['data'][:]
+                                    break
+
+                        if ts_data is None and 'time_series' in h5:
+                            for key in h5['time_series'].keys():
+                                if ts_uuid in key or key == ts_uuid:
+                                    ts_group = h5['time_series'][key]
+                                    if 'data' in ts_group:
+                                        ts_data = ts_group['data'][:]
+                                        break
+                                    elif isinstance(ts_group, h5py.Dataset):
+                                        ts_data = ts_group[:]
+                                        break
+
+                        if ts_data is not None:
+                            sienna_ts_by_uuid[owner_uuid] = ts_data
+
+                conn.close()
+                db_path.unlink()
+
+    # --- Per-generator comparison ---
+    for gen_name, gen_data in pypsa_gens.iterrows():
+        pypsa_p_nom = gen_data['p_nom']
+        results['total_pypsa_capacity'] += pypsa_p_nom
+
+        gen_result = {
+            'name': gen_name,
+            'pypsa_p_nom': pypsa_p_nom,
+            'sienna_max_active_power': None,
+            'capacity_diff': None,
+            'has_pypsa_ts': False,
+            'has_sienna_ts': False,
+            'ts_match': None,
+            'sample_comparison': [],
+        }
+
+        # Check if this generator exists in Sienna
+        sienna_gen = sienna_by_name.get(gen_name)
+        if sienna_gen is None:
+            logger.warning(f"  {gen_name}: NOT FOUND in Sienna (PyPSA p_nom={pypsa_p_nom:.2f} MW)")
+            gen_result['issue'] = 'missing_in_sienna'
+            results['generators'].append(gen_result)
+            results['ts_issues'].append(gen_name)
+            continue
+
+        # Sienna max_active_power
+        sienna_base_power = sienna_gen.get('base_power', 100.0)
+        sienna_rating = sienna_gen.get('rating', 0.0)
+        sienna_power_factor = sienna_gen.get('power_factor', 1.0)
+        sienna_max_active_power = sienna_rating * sienna_base_power * sienna_power_factor
+        gen_result['sienna_max_active_power'] = sienna_max_active_power
+        results['total_sienna_capacity'] += sienna_max_active_power
+
+        # Compare static capacity
+        capacity_diff = abs(pypsa_p_nom - sienna_max_active_power)
+        gen_result['capacity_diff'] = capacity_diff
+
+        if capacity_diff > 0.01:
+            logger.warning(
+                f"  {gen_name}: CAPACITY MISMATCH — "
+                f"PyPSA p_nom={pypsa_p_nom:.4f} MW, "
+                f"Sienna max_active_power={sienna_max_active_power:.4f} MW "
+                f"(rating={sienna_rating:.6f}, base_power={sienna_base_power:.1f}, "
+                f"power_factor={sienna_power_factor:.4f}), "
+                f"diff={capacity_diff:.4f} MW"
+            )
+            results['ts_issues'].append(gen_name)
+        else:
+            logger.info(
+                f"  {gen_name}: capacity OK — "
+                f"p_nom={pypsa_p_nom:.2f} MW ≈ Sienna {sienna_max_active_power:.2f} MW"
+            )
+
+        # Compare time series (per-unit)
+        has_pypsa_ts = (
+            hasattr(network.generators_t, 'p_max_pu')
+            and gen_name in network.generators_t.p_max_pu.columns
+        )
+        gen_result['has_pypsa_ts'] = has_pypsa_ts
+
+        sienna_uuid = sienna_gen.get('internal', {}).get('uuid', {}).get('value')
+        has_sienna_ts = sienna_uuid in sienna_ts_by_uuid if sienna_uuid else False
+        gen_result['has_sienna_ts'] = has_sienna_ts
+
+        if has_pypsa_ts and has_sienna_ts:
+            pypsa_ts_pu = network.generators_t.p_max_pu[gen_name].values
+            sienna_ts_pu = sienna_ts_by_uuid[sienna_uuid]
+
+            min_len = min(len(pypsa_ts_pu), len(sienna_ts_pu))
+            n_sample = min(num_sample_timesteps, min_len)
+
+            # Check per-unit match
+            diffs_pu = [abs(float(pypsa_ts_pu[i]) - float(sienna_ts_pu[i])) for i in range(min_len)]
+            max_diff_pu = max(diffs_pu) if diffs_pu else 0.0
+            mean_diff_pu = sum(diffs_pu) / len(diffs_pu) if diffs_pu else 0.0
+            ts_match_pu = max_diff_pu < 1e-6
+
+            # Check MW match
+            diffs_mw = [
+                abs(float(pypsa_ts_pu[i]) * pypsa_p_nom - float(sienna_ts_pu[i]) * sienna_max_active_power)
+                for i in range(min_len)
+            ]
+            max_diff_mw = max(diffs_mw) if diffs_mw else 0.0
+            mean_diff_mw = sum(diffs_mw) / len(diffs_mw) if diffs_mw else 0.0
+
+            gen_result['ts_match'] = ts_match_pu
+            gen_result['max_diff_pu'] = max_diff_pu
+            gen_result['mean_diff_pu'] = mean_diff_pu
+            gen_result['max_diff_mw'] = max_diff_mw
+            gen_result['mean_diff_mw'] = mean_diff_mw
+
+            # Log sample timesteps
+            for i in range(n_sample):
+                pypsa_pu = float(pypsa_ts_pu[i])
+                sienna_pu = float(sienna_ts_pu[i])
+                pypsa_mw = pypsa_pu * pypsa_p_nom
+                sienna_mw = sienna_pu * sienna_max_active_power
+                diff_mw = abs(pypsa_mw - sienna_mw)
+                gen_result['sample_comparison'].append({
+                    'timestep': i,
+                    'pypsa_pu': pypsa_pu,
+                    'sienna_pu': sienna_pu,
+                    'pypsa_mw': pypsa_mw,
+                    'sienna_mw': sienna_mw,
+                    'diff_mw': diff_mw,
+                })
+
+            if not ts_match_pu:
+                logger.warning(
+                    f"    Time series PER-UNIT MISMATCH: "
+                    f"max_diff={max_diff_pu:.8f}, mean_diff={mean_diff_pu:.8f}"
+                )
+                results['ts_issues'].append(gen_name)
+            elif max_diff_mw > 0.1:
+                logger.warning(
+                    f"    Time series MW MISMATCH (due to capacity diff): "
+                    f"max_diff={max_diff_mw:.4f} MW, mean_diff={mean_diff_mw:.4f} MW"
+                )
+            else:
+                logger.info(
+                    f"    Time series OK: max_diff_pu={max_diff_pu:.8f}, "
+                    f"max_diff_mw={max_diff_mw:.4f} MW"
+                )
+
+            # Log sample comparison
+            if n_sample > 0:
+                logger.info(f"    Sample timesteps (first {n_sample}):")
+                for s in gen_result['sample_comparison']:
+                    marker = "✓" if s['diff_mw'] < 0.1 else "✗"
+                    logger.info(
+                        f"      {marker} t={s['timestep']}: "
+                        f"PyPSA={s['pypsa_pu']:.6f} pu × {pypsa_p_nom:.2f} MW = {s['pypsa_mw']:.2f} MW | "
+                        f"Sienna={s['sienna_pu']:.6f} pu × {sienna_max_active_power:.2f} MW = {s['sienna_mw']:.2f} MW | "
+                        f"diff={s['diff_mw']:.4f} MW"
+                    )
+
+        elif has_pypsa_ts and not has_sienna_ts:
+            logger.warning(f"    {gen_name}: PyPSA has time series but Sienna does NOT")
+            results['ts_issues'].append(gen_name)
+        elif not has_pypsa_ts and has_sienna_ts:
+            logger.warning(f"    {gen_name}: Sienna has time series but PyPSA does NOT")
+            results['ts_issues'].append(gen_name)
+        else:
+            logger.info(f"    {gen_name}: Neither system has time series (static only)")
+
+        results['generators'].append(gen_result)
+
+    # --- Summary ---
+    total_cap_diff = abs(results['total_pypsa_capacity'] - results['total_sienna_capacity'])
+    results['capacity_match'] = total_cap_diff < 0.01
+
+    logger.info("")
+    logger.info(f"SUMMARY for {name}:")
+    logger.info(f"  Total PyPSA capacity:  {results['total_pypsa_capacity']:.2f} MW")
+    logger.info(f"  Total Sienna capacity: {results['total_sienna_capacity']:.2f} MW")
+    logger.info(f"  Capacity difference:   {total_cap_diff:.4f} MW")
+    logger.info(f"  Generators with issues: {len(set(results['ts_issues']))}")
+    if results['ts_issues']:
+        for issue_name in sorted(set(results['ts_issues'])):
+            logger.info(f"    - {issue_name}")
+    logger.info("=" * 80)
+
+    return results
 

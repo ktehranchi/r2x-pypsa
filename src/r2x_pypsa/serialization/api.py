@@ -15,8 +15,9 @@ from r2x.models import (
 from r2x.enums import PrimeMoversType, ThermalFuels
 from infrasys import TimeSeriesStorageType
 
-from r2x_pypsa.serialization.pypsa_to_psy import pypsa_component_to_psy
+from r2x_pypsa.serialization.pypsa_to_psy import pypsa_component_to_psy, convert_links_to_area_interchanges
 from r2x_pypsa.serialization.to_sienna import infrasys_to_psy
+from r2x_pypsa.models.link import PypsaLink
 
 
 def pypsa_to_sienna(
@@ -46,9 +47,16 @@ def pypsa_to_sienna(
         auto_add_composed_components=True,
         time_series_storage_type=TimeSeriesStorageType.HDF5
     )
-    
+
+    # Pre-process links to handle _fwd/_rev pairing
+    # This creates single AreaInterchange for paired links and converts flow_limits to per-unit
+    processed_links = convert_links_to_area_interchanges(pypsa_system, psy_system, mapping)
+
     # Convert all PyPSA components to PSY components
     for component in pypsa_system._component_mgr.iter_all():
+        # Skip already-processed links
+        if isinstance(component, PypsaLink) and component.name in processed_links:
+            continue
         try:
             pypsa_component_to_psy(component, pypsa_system, psy_system, mapping)
         except Exception as e:
